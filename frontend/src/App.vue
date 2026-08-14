@@ -1,12 +1,11 @@
 <template>
   <div class="app" :class="{ 'is-mobile': isMobile }">
-    <ChatView />
+    <router-view />
   </div>
 </template>
 
 <script setup lang="ts">
 import { computed } from 'vue'
-import ChatView from './views/ChatView.vue'
 
 const isMobile = computed(() => {
   return /Android|iPhone|iPad|iPod/i.test(navigator.userAgent)
@@ -48,12 +47,5 @@ body {
 
 .app.is-mobile {
   font-size: 15px;
-}
-
-/* Responsive */
-@media (min-width: 768px) {
-  .app {
-    max-width: 100%;
-  }
 }
 </style>

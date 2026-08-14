@@ -44,7 +44,10 @@ class ProfileStore:
         row = result.fetchone()
 
         if row:
-            data = json.loads(row[0])
+            data = row[0]
+            # PostgreSQL JSON column returns dict/list directly; str if from text column
+            if isinstance(data, str):
+                data = json.loads(data)
             return StudentProfile(**data)
 
         # Create default profile

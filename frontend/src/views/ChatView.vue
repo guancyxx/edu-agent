@@ -15,6 +15,8 @@
           <option value="chinese">语文</option>
           <option value="physics">物理</option>
         </select>
+        <span class="user-name" v-if="auth.user">{{ auth.user.display_name || auth.user.username }}</span>
+        <button class="logout-btn" @click="handleLogout">退出</button>
       </div>
     </header>
 
@@ -67,12 +69,17 @@
 
 <script setup lang="ts">
 import { ref, nextTick, onMounted, onUnmounted } from 'vue'
+import { useRouter } from 'vue-router'
+import { useAuthStore } from '../stores/auth'
 
 interface Message {
   role: 'user' | 'assistant'
   content: string
   skill?: string
 }
+
+const router = useRouter()
+const auth = useAuthStore()
 
 const messages = ref<Message[]>([
   {
@@ -107,8 +114,14 @@ function renderMarkdown(text: string): string {
 // ── WebSocket ───────────────────────────────────────────────
 
 function connect() {
+  const token = auth.token
+  if (!token) {
+    router.push('/login')
+    return
+  }
+
   const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:'
-  const wsUrl = `${protocol}//${location.hostname}:8000/api/chat/ws`
+  const wsUrl = `${protocol}//${location.hostname}:8000/api/chat/ws?token=${token}`
   ws = new WebSocket(wsUrl)
 
   ws.onopen = () => {
@@ -117,7 +130,10 @@ function connect() {
 
   ws.onclose = () => {
     connected.value = false
-    setTimeout(connect, 3000)
+    // Reconnect only if still authenticated
+    if (auth.isAuthenticated) {
+      setTimeout(connect, 3000)
+    }
   }
 
   ws.onerror = () => {
@@ -128,12 +144,16 @@ function connect() {
     const data = JSON.parse(event.data)
 
     switch (data.type) {
+      case 'auth_error':
+        loading.value = false
+        auth.logout()
+        router.push('/login')
+        break
+
       case 'trace':
-        // Could show "正在分析..." etc.
         break
 
       case 'skill':
-        // Attach skill info to the latest assistant message
         if (messages.value.length > 0) {
           const last = messages.value[messages.value.length - 1]
           if (last.role === 'assistant') {
@@ -143,7 +163,6 @@ function connect() {
         break
 
       case 'chunk':
-        // Append token to streaming message
         loading.value = false
         const lastMsg = messages.value[messages.value.length - 1]
         if (lastMsg && lastMsg.role === 'assistant') {
@@ -177,6 +196,12 @@ function connect() {
   }
 }
 
+function handleLogout() {
+  auth.logout()
+  ws?.close()
+  router.push('/login')
+}
+
 // ── Send ────────────────────────────────────────────────────
 
 function send() {
@@ -193,20 +218,19 @@ function send() {
   if (ws && ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify({
       message: text,
-      student_id: 'web-user',
       subject: subject.value,
-      grade: 7,
     }))
   } else {
-    // Fallback to HTTP
+    // Fallback to HTTP with auth
     fetch('http://localhost:8000/api/chat/send', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${auth.token}`,
+      },
       body: JSON.stringify({
         message: text,
-        student_id: 'web-user',
         subject: subject.value,
-        grade: 7,
       }),
     })
       .then(r => r.json())
@@ -283,6 +307,33 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   gap: 8px;
+}
+
+.header-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.user-name {
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.logout-btn {
+  background: transparent;
+  color: var(--text-secondary);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 4px 10px;
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.logout-btn:hover {
+  color: #ff6b6b;
+  border-color: #ff6b6b;
 }
 
 .logo { font-size: 24px; }

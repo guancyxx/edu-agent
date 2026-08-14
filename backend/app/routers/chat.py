@@ -1,22 +1,27 @@
 """Chat router — HTTP and WebSocket endpoints for tutoring conversations.
 
-The WebSocket endpoint streams LangGraph events to the frontend in real-time,
-providing token-by-token output, skill execution traces, and comprehension signals.
+WebSocket supports JWT auth via query param: ws://host/api/chat/ws?token=eyJ...
 """
 from __future__ import annotations
 
 import json
 import logging
 import uuid
-from typing import Any
+from typing import Any, Optional
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
-from langchain_core.messages import HumanMessage, AIMessage
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Depends, Query
+from langchain_core.messages import HumanMessage
 from pydantic import BaseModel
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.database import get_db, async_session
 from app.engine.graph import build_tutor_graph
+from app.models import User, TeachingEventDB
+from app.profile.store import profile_store
 from app.skills.loader import SkillLoader
 from app.skills.catalog import SkillCatalog
+from app.utils.auth import decode_access_token
 
 logger = logging.getLogger("edu-agent.chat")
 
@@ -30,40 +35,62 @@ _catalog = SkillCatalog(_loaded_skills)
 _tutor_graph = build_tutor_graph()
 
 
+# ── Token extraction for WebSocket ─────────────────────────────────
+
+async def _get_user_from_ws_token(websocket: WebSocket, db: AsyncSession) -> Optional[User]:
+    """Extract JWT from query param ?token=... and return the User or None."""
+    token = websocket.query_params.get("token")
+    if not token:
+        return None
+
+    payload = decode_access_token(token)
+    if not payload:
+        return None
+
+    user_id = payload.get("sub")
+    if not user_id:
+        return None
+
+    result = await db.execute(select(User).where(User.id == uuid.UUID(user_id)))
+    return result.scalar_one_or_none()
+
+
 # ── HTTP Models ────────────────────────────────────────────────────
 
 class ChatRequest(BaseModel):
-    """HTTP chat request (non-streaming fallback)."""
     message: str
-    student_id: str = "anonymous"
     subject: str = "math"
-    grade: int = 7
-    role: str = "student"
 
 
 class ChatResponse(BaseModel):
-    """HTTP chat response."""
     reply: str
     skill_used: str
     comprehension: str
     iteration_count: int
 
 
-# ── HTTP Endpoint ──────────────────────────────────────────────────
+# ── HTTP Endpoint (requires auth) ──────────────────────────────────
 
 @router.post("/send", response_model=ChatResponse)
-async def send_message(req: ChatRequest):
-    """Non-streaming chat endpoint (for testing / fallback)."""
+async def send_message(
+    req: ChatRequest,
+    user: User = Depends(
+        __import__("app.routers.auth", fromlist=["get_current_user"]).get_current_user
+    ),
+):
+    """Non-streaming chat endpoint."""
+    # Load student profile
+    async with async_session() as db:
+        profile = await profile_store.load(db, str(user.id))
+
+    state_dict = profile.to_state_dict()
+    state_dict["subject"] = req.subject
+    state_dict["role"] = user.role
+    state_dict["iteration_count"] = 0
+
     result = await _tutor_graph.ainvoke(
-        {
-            "messages": [HumanMessage(content=req.message)],
-            "student_id": req.student_id,
-            "subject": req.subject,
-            "grade": req.grade,
-            "role": req.role,
-            "iteration_count": 0,
-        },
-        config={"configurable": {"thread_id": f"{req.student_id}-{uuid.uuid4().hex[:8]}"}},
+        {"messages": [HumanMessage(content=req.message)], **state_dict},
+        config={"configurable": {"thread_id": f"{user.id}-{uuid.uuid4().hex[:8]}"}},
     )
 
     return ChatResponse(
@@ -74,57 +101,66 @@ async def send_message(req: ChatRequest):
     )
 
 
-# ── WebSocket Endpoint ─────────────────────────────────────────────
+# ── WebSocket Endpoint (requires token in query) ───────────────────
 
 @router.websocket("/ws")
 async def chat_websocket(websocket: WebSocket):
     """Streaming chat over WebSocket.
 
-    Client sends JSON: {"message": "...", "student_id": "...", "subject": "math", "grade": 7}
-    Server streams events:
-      - {"type": "trace", "node": "assess", "message": "..."}
-      - {"type": "skill", "skill": "concept-explain", "layer": "atom"}
-      - {"type": "chunk", "content": "..."}   (token-by-token)
-      - {"type": "done", "reply": "...", "comprehension": "understood"}
-      - {"type": "error", "message": "..."}
+    Connect: ws://host/api/chat/ws?token=<JWT>
+    Client sends: {"message": "...", "subject": "math"}
+    Server streams: trace / skill / chunk / done / error events.
     """
+    # Authenticate before accepting
+    async with async_session() as db:
+        user = await _get_user_from_ws_token(websocket, db)
+
+    if not user:
+        await websocket.accept()
+        await websocket.send_text(json.dumps({
+            "type": "auth_error",
+            "message": "Invalid or missing token. Connect with ?token=<JWT>",
+        }))
+        await websocket.close(code=4001)
+        return
+
     await websocket.accept()
-    logger.info("WebSocket connected")
+    logger.info("WebSocket connected: user=%s (%s)", user.username, user.role)
 
     try:
         while True:
             raw = await websocket.receive_text()
             data = json.loads(raw)
             message = data.get("message", "")
-            student_id = data.get("student_id", "anonymous")
             subject = data.get("subject", "math")
-            grade = data.get("grade", 7)
-            role = data.get("role", "student")
 
             if not message.strip():
                 await websocket.send_text(json.dumps({"type": "error", "message": "Empty message"}))
                 continue
 
-            thread_id = f"{student_id}-{uuid.uuid4().hex[:8]}"
-            logger.info("Processing: student=%s thread=%s", student_id, thread_id)
+            # Load student profile from DB
+            async with async_session() as db:
+                profile = await profile_store.load(db, str(user.id))
 
-            # Send trace events as the graph executes
+            profile.total_messages += 1
+            profile.primary_subject = subject
+
+            state_dict = profile.to_state_dict()
+            state_dict["subject"] = subject
+            state_dict["role"] = user.role
+            state_dict["iteration_count"] = 0
+
+            thread_id = f"{user.id}-{uuid.uuid4().hex[:8]}"
+            logger.info("Processing: user=%s thread=%s", user.username, thread_id)
+
             try:
-                # Stream events from LangGraph and collect final output
                 final_output = ""
                 final_skill = ""
                 final_comprehension = "no_response"
                 final_iteration = 0
 
                 async for event in _tutor_graph.astream_events(
-                    {
-                        "messages": [HumanMessage(content=message)],
-                        "student_id": student_id,
-                        "subject": subject,
-                        "grade": grade,
-                        "role": role,
-                        "iteration_count": 0,
-                    },
+                    {"messages": [HumanMessage(content=message)], **state_dict},
                     config={"configurable": {"thread_id": thread_id}},
                     version="v2",
                 ):
@@ -132,7 +168,6 @@ async def chat_websocket(websocket: WebSocket):
                     evt_name = event.get("name", "")
                     evt_data = event.get("data", {})
 
-                    # Node started/finished → trace event
                     if evt_kind in ("on_chain_start", "on_chain_end") and evt_name in (
                         "assess", "router", "execute", "observe", "update"
                     ):
@@ -154,7 +189,6 @@ async def chat_websocket(websocket: WebSocket):
                             elif evt_name == "execute" and isinstance(output, dict):
                                 final_output = output.get("skill_output", "")
                                 final_comprehension = output.get("comprehension_signal", "no_response")
-                                # Send the full output as chunks
                                 if final_output:
                                     await websocket.send_text(json.dumps({
                                         "type": "chunk",
@@ -163,7 +197,6 @@ async def chat_websocket(websocket: WebSocket):
                             elif evt_name == "assess" and isinstance(output, dict):
                                 final_iteration = output.get("iteration_count", 0)
 
-                    # LLM token streaming
                     elif evt_kind == "on_chat_model_stream":
                         chunk = evt_data.get("chunk")
                         if chunk and hasattr(chunk, "content") and chunk.content:
@@ -171,6 +204,25 @@ async def chat_websocket(websocket: WebSocket):
                                 "type": "chunk",
                                 "content": chunk.content,
                             }, ensure_ascii=False))
+
+                # Persist profile + teaching event after graph completes
+                async with async_session() as db:
+                    # Update knowledge mastery if delta exists
+                    # (update_node would set this in real implementation)
+                    profile.total_messages = profile.total_messages  # already incremented
+                    await profile_store.save(db, profile)
+
+                    # Log teaching event
+                    event_log = TeachingEventDB(
+                        user_id=str(user.id),
+                        skill_id=final_skill or "unknown",
+                        student_message=message[:2000],
+                        skill_output=final_output[:5000] if final_output else None,
+                        comprehension=final_comprehension,
+                        iteration_count=final_iteration,
+                    )
+                    db.add(event_log)
+                    await db.commit()
 
                 await websocket.send_text(json.dumps({
                     "type": "done",
@@ -188,6 +240,6 @@ async def chat_websocket(websocket: WebSocket):
                 }, ensure_ascii=False))
 
     except WebSocketDisconnect:
-        logger.info("WebSocket disconnected")
+        logger.info("WebSocket disconnected: user=%s", user.username)
     except Exception as e:
         logger.exception("WebSocket error")

@@ -28,30 +28,44 @@ MAX_ITERATIONS = 3
 
 
 async def assess_node(state: TutorState) -> dict[str, Any]:
-    """Assess the student's current profile from the latest messages.
+    """Assess the student's current profile from the database.
 
-    Placeholder implementation: logs the assessment entry point and bumps the
-    iteration counter so the graph can enforce a max-iterations guard.
-
-    Parameters
-    ----------
-    state:
-        Current tutoring state (read-only snapshot).
-
-    Returns
-    -------
-    dict
-        Partial update containing the incremented ``iteration_count``.
+    Loads the student's learning profile (knowledge mastery, emotion window,
+    ability level, learning style) from PostgreSQL via ProfileStore.
     """
     iteration = state.get("iteration_count", 0)
+    student_id = state.get("student_id", "")
+
     logger.info(
         "assess_node: student=%s subject=%s grade=%s iteration=%d",
-        state.get("student_id"),
+        student_id,
         state.get("subject"),
         state.get("grade"),
         iteration,
     )
-    return {"iteration_count": iteration + 1}
+
+    # Load profile from DB
+    profile_data: dict[str, Any] = {}
+    if student_id:
+        try:
+            from app.database import async_session
+            from app.profile.store import profile_store
+
+            async with async_session() as db:
+                profile = await profile_store.load(db, student_id)
+                profile_data = profile.to_state_dict()
+        except Exception as e:
+            logger.warning("assess_node: could not load profile (%s), using defaults", e)
+
+    # Merge loaded profile into state (only update fields that have values)
+    update: dict[str, Any] = {"iteration_count": iteration + 1}
+    if profile_data:
+        for key in ("knowledge_mastery", "emotion_state", "ability_level",
+                     "learning_style", "recent_mistakes", "grade"):
+            val = profile_data.get(key)
+            if val is not None:
+                update[key] = val
+    return update
 
 
 async def router_node(state: TutorState) -> dict[str, Any]:
@@ -192,23 +206,54 @@ async def observe_node(state: TutorState) -> dict[str, Any]:
 
 
 async def update_node(state: TutorState) -> dict[str, Any]:
-    """Persist the teaching event and close out the graph run.
+    """Persist the teaching event and update the student profile.
 
-    Placeholder: logs a summary of what happened during this run. The real
-    implementation will write a ``TeachingEvent`` row and update the student
-    profile with ``knowledge_delta``.
-
-    Returns
-    -------
-    dict
-        Empty dict — no further state changes are needed at the end of the run.
+    Writes knowledge_delta to the student's profile, appends the current
+    emotion signal to the emotion history, and logs a TeachingEvent row.
     """
+    student_id = state.get("student_id", "")
+    skill = state.get("selected_skill", "unknown")
+    comprehension = state.get("comprehension_signal", "no_response")
+    delta = state.get("knowledge_delta", {})
+
     logger.info(
-        "update_node: persisting teaching event student=%s skill=%s "
-        "iterations=%d comprehension=%s",
-        state.get("student_id"),
-        state.get("selected_skill"),
-        state.get("iteration_count"),
-        state.get("comprehension_signal"),
+        "update_node: persisting student=%s skill=%s comprehension=%s",
+        student_id, skill, comprehension,
     )
+
+    if student_id:
+        try:
+            from app.database import async_session
+            from app.profile.store import profile_store
+
+            async with async_session() as db:
+                profile = await profile_store.load(db, student_id)
+
+                # Apply knowledge deltas
+                if delta:
+                    for kp_id, change in delta.items():
+                        if isinstance(change, dict):
+                            score = change.get("mastery", 0)
+                        elif isinstance(change, (int, float)):
+                            score = float(change)
+                        else:
+                            continue
+                        profile.update_mastery(kp_id, score - profile.knowledge_mastery.get(kp_id, 0))
+
+                # Map comprehension to emotion update
+                emotion_map = {
+                    "understood": {"confidence": 0.8, "frustration": 0.1, "confusion": 0.1},
+                    "confused": {"confusion": 0.7, "frustration": 0.3},
+                    "partial": {"confusion": 0.4, "confidence": 0.4},
+                }
+                emotion_update = emotion_map.get(comprehension, {})
+                if emotion_update:
+                    profile.emotion_history.append(emotion_update)
+                    profile.emotion_history = profile.emotion_history[-20:]  # keep last 20
+
+                await profile_store.save(db, profile)
+
+        except Exception as e:
+            logger.warning("update_node: could not save profile (%s)", e)
+
     return {}
