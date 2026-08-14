@@ -2,11 +2,16 @@ from pydantic_settings import BaseSettings
 
 
 class Settings(BaseSettings):
-    # LLM
+    # LLM (text teaching model — DeepSeek)
     llm_base_url: str = "https://api.deepseek.com/v1"
     llm_api_key: str = ""
     llm_model: str = "deepseek-chat"
     llm_timeout: int = 60
+
+    # Vision model (image understanding — Zhipu GLM)
+    glm_base_url: str = "https://open.bigmodel.cn/api/paas/v4"
+    glm_api_key: str = ""
+    glm_vision_model: str = "glm-4v-flash"
 
     # Database
     database_url: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/edu_agent"

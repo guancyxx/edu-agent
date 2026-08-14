@@ -35,6 +35,48 @@ _catalog = SkillCatalog(_loaded_skills)
 _tutor_graph = build_tutor_graph()
 
 
+async def _extract_text_from_images(
+    images: list[str],
+    message: str = "",
+) -> str:
+    """Extract question/content text from images via the vision model.
+
+    Uses the Zhipu GLM vision model to "read" the image (math problem,
+    geometry diagram, handwritten formula, etc.) and return a text
+    description that the text-only teaching model can reason over.
+    """
+    from app.engine.llm import get_vision_llm
+
+    vision_llm = get_vision_llm()
+
+    content_parts: list[dict] = []
+    for img in images[:4]:
+        content_parts.append({"type": "image_url", "image_url": {"url": img}})
+    instruction = (
+        "这是一道题目或学习内容的图片。请准确读出图中的题目文字、公式、"
+        "图形信息。如果是数学题，请用文字描述题目和已知条件；如果是几何图，"
+        "请描述图形的形状、标注和关系。只输出识别到的内容，不要解答。"
+    )
+    if message.strip():
+        instruction += f"\n\n学生的问题：{message}"
+    content_parts.append({"type": "text", "text": instruction})
+
+    try:
+        response = await vision_llm.ainvoke([
+            HumanMessage(content=content_parts)
+        ])
+        extracted = response.content if hasattr(response, "content") else str(response)
+        if isinstance(extracted, list):
+            extracted = "".join(
+                part if isinstance(part, str) else str(getattr(part, "text", part))
+                for part in extracted
+            )
+        return extracted.strip()
+    except Exception as e:
+        logger.warning("Vision extraction failed (%s)", e)
+        return ""
+
+
 # ── Token extraction for WebSocket ─────────────────────────────────
 
 async def _get_user_from_ws_token(websocket: WebSocket, db: AsyncSession) -> Optional[User]:
@@ -133,10 +175,28 @@ async def chat_websocket(websocket: WebSocket):
             data = json.loads(raw)
             message = data.get("message", "")
             subject = data.get("subject", "math")
+            images = data.get("images", [])  # list of base64 data-URL strings
 
-            if not message.strip():
+            if not message.strip() and not images:
                 await websocket.send_text(json.dumps({"type": "error", "message": "Empty message"}))
                 continue
+
+            # Build the human message: text-only, or vision-extracted when images present
+            if images:
+                # Extract question text from images via vision model, then
+                # hand the extracted text to the (text-only) teaching agent.
+                extracted = await _extract_text_from_images(images, message)
+                if extracted:
+                    combined = (
+                        f"{message}\n\n[图片识别出的题目]\n{extracted}"
+                        if message.strip() else extracted
+                    )
+                else:
+                    combined = message or "（图片无法识别，请用文字描述题目）"
+                human_message = HumanMessage(content=combined)
+                logger.info("Vision extracted %d chars from %d image(s)", len(extracted), len(images))
+            else:
+                human_message = HumanMessage(content=message)
 
             # Load student profile from DB
             async with async_session() as db:
@@ -151,7 +211,10 @@ async def chat_websocket(websocket: WebSocket):
             state_dict["iteration_count"] = 0
 
             thread_id = f"{user.id}-{uuid.uuid4().hex[:8]}"
-            logger.info("Processing: user=%s thread=%s", user.username, thread_id)
+            logger.info(
+                "Processing: user=%s thread=%s images=%d",
+                user.username, thread_id, len(images),
+            )
 
             try:
                 final_output = ""
@@ -160,7 +223,7 @@ async def chat_websocket(websocket: WebSocket):
                 final_iteration = 0
 
                 async for event in _tutor_graph.astream_events(
-                    {"messages": [HumanMessage(content=message)], **state_dict},
+                    {"messages": [human_message], **state_dict},
                     config={"configurable": {"thread_id": thread_id}},
                     version="v2",
                 ):

@@ -16,6 +16,7 @@ Pipeline::
 from __future__ import annotations
 
 import logging
+import uuid
 from typing import Any
 
 from app.engine.state import TutorState
@@ -256,7 +257,18 @@ async def execute_node(state: TutorState) -> dict[str, Any]:
         if skill_meta is not None:
             from app.engine.llm import get_llm
             llm = get_llm()
-            result = await run_atom(skill_meta, state, llm)
+
+            # Inject the student message + problem context into the template
+            # context so skill bodies can reference {{ student_message }} etc.
+            skill_state = dict(state)
+            skill_state["student_message"] = user_text
+            skill_state["problem_context"] = user_text
+            params = state.get("skill_params") or {}
+            if isinstance(params, dict):
+                skill_state["concept_id"] = params.get("concept_id", "")
+                skill_state["problem_context"] = params.get("problem_context", "") or user_text
+
+            result = await run_atom(skill_meta, skill_state, llm)
             logger.info("execute_node: skill=%s comprehension=%s", skill_name, result.comprehension)
             return {
                 "skill_output": result.output,
@@ -368,6 +380,37 @@ async def update_node(state: TutorState) -> dict[str, Any]:
                     profile.emotion_history = profile.emotion_history[-20:]  # keep last 20
 
                 await profile_store.save(db, profile)
+
+            # Auto-record mistake when student is confused or made an error
+            if comprehension in ("confused", "partial"):
+                try:
+                    from app.models import MistakeEntryDB
+                    messages_list = state.get("messages", [])
+                    user_msg = ""
+                    for m in reversed(messages_list):
+                        role = getattr(m, "type", "") or getattr(m, "role", "")
+                        if role in ("human", "user"):
+                            user_msg = getattr(m, "content", "")[:2000]
+                            break
+
+                    skill_output = (state.get("skill_output") or "")[:5000]
+                    async with async_session() as mistake_db:
+                        mistake = MistakeEntryDB(
+                            user_id=uuid.UUID(student_id),
+                            subject=state.get("subject", "math"),
+                            question=user_msg or "(empty message)",
+                            correct_answer=skill_output or None,
+                            explanation=f"Student was {comprehension}. Skill: {skill}",
+                            source="chat",
+                        )
+                        mistake_db.add(mistake)
+                        await mistake_db.commit()
+                        logger.info(
+                            "update_node: auto-recorded mistake #%d (comprehension=%s)",
+                            mistake.id, comprehension,
+                        )
+                except Exception as me:
+                    logger.warning("update_node: could not record mistake (%s)", me)
 
         except Exception as e:
             logger.warning("update_node: could not save profile (%s)", e)

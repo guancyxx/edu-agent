@@ -80,3 +80,34 @@ class TeachingEventDB(Base):
     comprehension = Column(String(32), nullable=True)
     iteration_count = Column(Integer, default=1)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+
+class MistakeEntryDB(Base):
+    """A single mistake record in the student's mistake notebook.
+
+    Tracks wrong answers with spaced-repetition scheduling (SM-2 algorithm).
+    Each entry represents one knowledge gap the student needs to review.
+    """
+    __tablename__ = "edu_mistake_entries"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(UUID(as_uuid=True), ForeignKey("edu_users.id"), nullable=False, index=True)
+    subject = Column(String(32), nullable=False, default="math")
+    question = Column(Text, nullable=False)
+    student_answer = Column(Text, nullable=True)
+    correct_answer = Column(Text, nullable=True)
+    explanation = Column(Text, nullable=True)
+    knowledge_point_id = Column(String(64), nullable=True)  # links to curriculum
+    source = Column(String(32), nullable=False, default="chat")  # chat/manual/quiz
+
+    # SM-2 spaced repetition fields
+    review_count = Column(Integer, default=0)
+    ease_factor = Column(Integer, default=2500)  # SM-2 ease * 1000 (e.g. 2.5 → 2500)
+    interval_days = Column(Integer, default=1)
+    next_review_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    last_reviewed_at = Column(DateTime(timezone=True), nullable=True)
+    status = Column(String(16), default="learning")  # learning/reviewing/mastered
+
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc),
+                        onupdate=lambda: datetime.now(timezone.utc))
