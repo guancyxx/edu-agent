@@ -16,6 +16,7 @@
           <option value="physics">物理</option>
         </select>
         <span class="user-name" v-if="auth.user">{{ auth.user.display_name || auth.user.username }}</span>
+        <button class="mistakes-btn" @click="$router.push('/mistakes')">📒 错题本</button>
         <button class="logout-btn" @click="handleLogout">退出</button>
       </div>
     </header>
@@ -329,6 +330,21 @@ onUnmounted(() => {
   font-size: 12px;
   cursor: pointer;
   transition: all 0.2s;
+}
+
+.mistakes-btn {
+  background: transparent;
+  color: var(--accent);
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  padding: 4px 10px;
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.mistakes-btn:hover {
+  background: rgba(74, 158, 255, 0.1);
 }
 
 .logout-btn:hover {

@@ -14,6 +14,12 @@ const routes = [
     component: () => import('../views/ChatView.vue'),
     meta: { requiresAuth: true },
   },
+  {
+    path: '/mistakes',
+    name: 'mistakes',
+    component: () => import('../views/MistakesView.vue'),
+    meta: { requiresAuth: true },
+  },
 ]
 
 const router = createRouter({
