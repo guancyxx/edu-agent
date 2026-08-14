@@ -1,0 +1,43 @@
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: edu-postgres
+    environment:
+      POSTGRES_DB: edu_agent
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5433:5432"
+    volumes:
+      - edu-pgdata:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: edu-redis
+    ports:
+      - "6380:6379"
+    restart: unless-stopped
+
+  backend:
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+    container_name: edu-backend
+    ports:
+      - "8000:8000"
+    volumes:
+      - ../backend/app:/app/app
+      - ../skills:/app/skills
+      - ./.env:/app/.env
+    environment:
+      - EDU_DATABASE_URL=postgresql+asyncpg://postgres:postgres@edu-postgres:5432/edu_agent
+      - EDU_REDIS_URL=redis://edu-redis:6379/0
+      - EDU_SKILLS_DIR=/app/skills
+    depends_on:
+      - postgres
+      - redis
+    restart: unless-stopped
+
+volumes:
+  edu-pgdata:

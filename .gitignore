@@ -1,0 +1,33 @@
+# Backend
+backend/.env
+backend/.env.*
+backend/__pycache__/
+backend/**/__pycache__/
+backend/.venv/
+backend/*.egg-info/
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+frontend/.env.local
+frontend/.env.*.local
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Data
+data/
+!data/.gitkeep
+
+# Docker
+docker/volumes/
+
+# LangSmith
+.langsmith/
