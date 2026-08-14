@@ -20,6 +20,7 @@ from __future__ import annotations
 import logging
 
 from langgraph.graph import END, START, StateGraph
+from langgraph.checkpoint.memory import MemorySaver
 
 from app.engine.nodes import (
     assess_node,
@@ -65,7 +66,7 @@ def build_tutor_graph():
 
     graph.add_edge("update", END)
 
-    return graph.compile()
+    return graph.compile(checkpointer=MemorySaver())
 
 
 # Module-level singleton. Wrapped so that importing this package never raises

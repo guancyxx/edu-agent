@@ -97,22 +97,66 @@ async def router_node(state: TutorState) -> dict[str, Any]:
 async def execute_node(state: TutorState) -> dict[str, Any]:
     """Execute the selected skill and capture its output.
 
-    Placeholder: returns a sentinel output and a ``no_response`` comprehension
-    signal. The real implementation will dispatch to the SkillRunner based on
-    ``selected_skill`` and ``skill_layer``.
-
-    Returns
-    -------
-    dict
-        Partial update with ``skill_output`` and ``comprehension_signal``.
+    Renders the skill prompt template with current state, calls the LLM,
+    and returns the response along with a comprehension heuristic.
+    Falls back to a simple direct LLM call if the skill is not found.
     """
-    skill = state.get("selected_skill", "<none>")
-    layer = state.get("skill_layer", "<none>")
-    logger.info("execute_node: skill=%s layer=%s", skill, layer)
-    return {
-        "skill_output": "[skill execution placeholder]",
-        "comprehension_signal": "no_response",
-    }
+    skill_name = state.get("selected_skill", "concept-explain")
+    logger.info("execute_node: skill=%s", skill_name)
+
+    # Build the LLM prompt
+    messages = state.get("messages", [])
+    last_message = messages[-1] if messages else None
+    user_text = getattr(last_message, "content", str(last_message)) if last_message else ""
+
+    # Try to load the skill and render its template
+    try:
+        from app.skills.loader import SkillLoader
+        from app.skills.runner import run_atom
+
+        loader = SkillLoader()
+        skills = loader.load_directory("../skills")
+        skill_meta = next((s for s in skills if s.name == skill_name), None)
+
+        if skill_meta:
+            from app.engine.llm import get_llm
+            llm = get_llm()
+            result = await run_atom(skill_meta, state, llm)
+            logger.info("execute_node: skill=%s comprehension=%s", skill_name, result.comprehension)
+            return {
+                "skill_output": result.output,
+                "comprehension_signal": result.comprehension,
+                "knowledge_delta": result.knowledge_delta,
+            }
+    except Exception as e:
+        logger.warning("execute_node: skill execution failed (%s), falling back to direct LLM", e)
+
+    # Fallback: direct LLM call without skill template
+    try:
+        from app.engine.llm import get_llm
+        from langchain_core.messages import SystemMessage, HumanMessage
+
+        llm = get_llm()
+        system = SystemMessage(content=(
+            "You are a helpful K12 tutor. Explain clearly in Chinese (简体中文). "
+            "Use Markdown formatting. For math, use LaTeX ($...$ inline, $$...$$ block). "
+            "Keep explanations concise and age-appropriate."
+        ))
+        human = HumanMessage(content=user_text)
+        response = await llm.ainvoke([system, human])
+        output = response.content if hasattr(response, "content") else str(response)
+        return {
+            "skill_output": output,
+            "comprehension_signal": "understood",
+            "knowledge_delta": {},
+        }
+    except Exception as e:
+        logger.error("execute_node: LLM call failed: %s", e)
+        return {
+            "skill_output": f"抱歉，处理时出现了错误：{e}",
+            "comprehension_signal": "understood",  # Stop the loop even on error
+            "knowledge_delta": {},
+        }
 
 
 async def observe_node(state: TutorState) -> dict[str, Any]:
