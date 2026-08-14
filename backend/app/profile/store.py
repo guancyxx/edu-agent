@@ -19,17 +19,17 @@ logger = logging.getLogger("edu-agent.profile")
 
 DEFAULT_PROFILE_SQL = text("""
     INSERT INTO edu_student_profiles (user_id, profile_data)
-    VALUES (:user_id, :data)
+    VALUES (CAST(:user_id AS UUID), :data)
     ON CONFLICT (user_id) DO NOTHING
 """)
 
 GET_PROFILE_SQL = text("""
-    SELECT profile_data FROM edu_student_profiles WHERE user_id = :user_id
+    SELECT profile_data FROM edu_student_profiles WHERE user_id = CAST(:user_id AS UUID)
 """)
 
 UPSERT_PROFILE_SQL = text("""
     INSERT INTO edu_student_profiles (user_id, profile_data, updated_at)
-    VALUES (:user_id, :data, NOW())
+    VALUES (CAST(:user_id AS UUID), :data, NOW())
     ON CONFLICT (user_id)
     DO UPDATE SET profile_data = EXCLUDED.profile_data, updated_at = NOW()
 """)
