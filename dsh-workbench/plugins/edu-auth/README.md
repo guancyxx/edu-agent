@@ -1,70 +1,96 @@
 # edu-auth plugin
 
-Experimental login gate + `/api` token fence for the dsh student workbench
-(edu-agent track 2, docs/PLAN-dsh-workbench.md §3.1).
+Login gate + `/api` token fence + WebSocket upgrade fence for the dsh student
+workbench (edu-agent track 2, docs/PLAN-dsh-workbench.md).
 
 ## Files
 
 - `src/index.ts` — the plugin (function plugin: `name` / `inject` / `apply`)
+- `src/jwt.ts` — dependency-free HS256 JWT verification (node:crypto)
 - `cordis.yml` — `--patch` overlay mounting the plugin into a dsh profile
+  (path points at the worktree copy; adjust when running from elsewhere)
 
-## Function A — login page at /workbench
+## Function A + D — login page and real login at /workbench
 
-`ctx.webServer.register({ kind: 'exact', path: '/workbench' })` serves a minimal
-English HTML login form. Public (no token required) by design — it is the entry
-point that will later obtain the JWT.
+- `GET /workbench` serves an English HTML sign-in form (public by design).
+- `POST /workbench` with `application/x-www-form-urlencoded`
+  `username`/`password` is forwarded to the edu-agent backend
+  `{EDU_BASE_URL}/api/auth/login` (default `http://127.0.0.1:8000`; same env
+  var as edu-tools). Success renders the real JWT **and** sets it as an
+  `HttpOnly; SameSite=Lax` cookie `edu_token` (`Max-Age=86400`). Wrong
+  credentials → 401; backend unreachable → 502; missing fields → 400.
 
-## Function B — /api token fence
+### Cookie plan and its limits
 
-**Mechanism (research findings, verified):**
+- Same-origin browser requests automatically carry `edu_token` afterwards.
+  **However**, the `/api` token fence (Function B) and the WS upgrade fence
+  (Function C) currently read only `Authorization` / `?token=` — they do NOT
+  read the cookie. The fence would need a cookie-parsing branch before the
+  cookie alone grants access; until then the token shown on the success page
+  must be copied into the dsh frontend's fetch headers manually.
+- The dsh web frontend calls `/api` with `fetch`. Cookies are sent on
+  same-origin fetch by default (`credentials: 'same-origin'`), so the cookie
+  would ride along — but again only matters once the fence accepts cookies.
+- `SameSite=Lax` suits same-origin use; a cross-origin frontend would need
+  `SameSite=None; Secure` plus a proper origin allowlist (not done here).
+- The token is displayed in the page body for the workbench demo flow — a
+  real deployment must not echo credentials/tokens to generic pages.
 
-- The Typert `/api` interceptor seat (`connection.rpc.intercept('/api', ...)`)
-  is single-holder and already taken by `typert-gateway` in the default web
-  composition; a second registration throws.
-- `rpcFetchHandler` (packages/client/connection/src/rpc-host.ts) only returns
-  200/400/404/415/500 — there is no 401 path from inside the interceptor.
-- Equivalent seam chosen: the `/api` **prefix WebRoute** registered by
-  client-connection (packages/client/connection/src/index.ts) whose handler runs
-  the browser-trust fence + HTTP bridge. This plugin wraps that route handler
-  (and monkey-patches `webServer.register` to also wrap any later `/api` prefix
-  registration) with an Authorization check that answers **401 Unauthorized**
-  before the fence/bridge run.
+## Function B — /api HTTP token fence (T8)
 
-**Placeholder validation:** any non-empty `Authorization: Bearer <token>`
-passes. Real JWT verification against the edu-agent backend is future work.
+The Typert `/api` interceptor seat is single-holder (taken by
+typert-gateway) and `rpcFetchHandler` has no 401 path, so the fence wraps
+the `/api` **prefix WebRoute** handler registered by client-connection
+(plus a `webServer.register` monkey-patch for later registrations). Every
+`/api` request needs a valid HS256 bearer JWT (`EDU_JWT_SECRET`, same secret
+the backend signs with) or gets **401** + `www-authenticate: Bearer`.
 
-## Verified live (dsh web, port 3082, curl -i)
+## Function C — WebSocket upgrade fence (T10)
+
+`/api/events.mux` and `/api/events.host` upgrades are rejected with a raw
+`HTTP/1.1 401` before protocol negotiation unless the handshake carries a
+valid JWT. **Browsers cannot set custom headers on a WS handshake**, so the
+token is accepted from:
+
+1. `Authorization: Bearer <jwt>` (non-browser clients), or
+2. a `?token=<jwt>` query parameter — **the browser front end must be
+   changed to append this to its WS URL**; that frontend change is future
+   work and not in this repo.
+
+Mechanism: client-connection registers both routes via
+`webServer.registerUpgrade` (exact path; duplicates throw), so the plugin
+patches `registerUpgrade` to fence handlers at registration time (same
+strategy as the HTTP fence) and also wraps already-registered entries in
+the live `upgrades` Map; teardown restores originals.
+
+## Verified live (dsh web @3088, real backend JWT via /api/auth/register)
 
 | Request | Result |
 |---|---|
-| GET /workbench | 200, login page HTML |
-| POST /api/session/list, no token | **401** + `www-authenticate: Bearer` |
-| POST /api/session/list, `Bearer test-token-123` | 404 (fence passed; carrier's normal response for an unknown endpoint) |
-| GET /api/events.mux, no token | 401 |
-| GET /api/events.mux, with token | 426 upgrade required (passed fence, reached dsh's own handler) |
-| POST /api/..., `Authorization: Basic abc` | 401 (only Bearer accepted) |
+| GET /workbench | 200, login form HTML |
+| POST /workbench, correct credentials | **200 + real JWT + `set-cookie: edu_token=...`** |
+| POST /workbench, wrong credentials | **401** |
+| POST /workbench, missing fields | 400 |
+| POST /api/session/list, no token | 401 + `www-authenticate: Bearer` |
+| POST /api/session/list, valid Bearer | 415 (fence passed; carrier's normal response) |
+| WS upgrade /api/events.mux, no token | **401 Unauthorized** (raw socket) |
+| WS upgrade /api/events.mux / events.host, `?token=garbage` | **401** |
+| WS upgrade, valid `Authorization: Bearer` header | **101 Switching Protocols** |
+| WS upgrade, valid `?token=<jwt>` query (mux + host) | **101 Switching Protocols** |
 
 ## Run it
 
 ```sh
 cd ~/workspace/deepseek-harness
 DSH_HOME=<dsh-home> node --import tsx/esm apps/cli/src/bin.ts \
-  --profile web --patch ~/workspace/edu-agent/dsh-workbench/plugins/edu-auth/cordis.yml \
-  --port 3082
+  --profile web --patch /tmp/edu-agent-t10/dsh-workbench/plugins/edu-auth/cordis.yml \
+  --port 3088
 ```
 
-Notes: `--patch` must precede the app flags (`dsh web --patch ...` fails:
-the web app rejects parent flags). Built `lib/` under plain Node cannot import
-`.ts` plugins — use the source launcher (`node --import tsx/esm apps/cli/src/bin.ts`)
-on Node >= 24 (Node 22 hits `ERR_REQUIRE_CYCLE_MODULE` importing the .ts entry).
+Env: `EDU_JWT_SECRET` (backend signing secret; default
+`change-me-in-production`), `EDU_BASE_URL` (backend origin, default
+`http://127.0.0.1:8000`).
 
-## Remaining work
-
-- ~~Real JWT verification~~ — DONE (T8): HS256 + expiry via `src/jwt.ts`
-  (`node:crypto`, no deps); secret from `EDU_JWT_SECRET` (same default
-  fallback as the backend). Live-verified: no/tampered/expired/garbage
-  tokens all answer 401.
-- Login page actually obtains/stores the token host-side (bind to
-  connection/session) — plan §8 T11
-- WebSocket upgrade routes (/api/events.*) are not token-fenced yet —
-  plan §8 T10
+Notes: `--patch` must precede the app flags. Built `lib/` under plain Node
+cannot import `.ts` plugins — use the source launcher
+(`node --import tsx/esm apps/cli/src/bin.ts`) on Node >= 24.
