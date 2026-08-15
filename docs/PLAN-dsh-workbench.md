@@ -102,6 +102,16 @@ dsh 自身无认证（官方明示：No TLS, auth, or origin policy）。方案�
 
 ## 7. Phase 划分
 
-- Phase 0（1 周）：T1–T5，本地单机验证
+- Phase 0（1 周）：T1–T5，本地单机验证 ✅（含 T7 E2E，2026-08-14 完工）
 - Phase 1：T6–T7 + Python SDK 服务端池化评估（如需多 host）
 - Phase 2：观察 dsh 稳定性（1.0/API 冻结信号），决定加投或换基座
+
+## 8. 二期 backlog（2026-08-14 起，08-15 更新）
+
+- ✅ T8 真 JWT 校验（874777d）：HS256+过期，sub 取 user_id；无/篡改/过期 token 全 401 实测
+- ✅ T9 session 粒度防护（874777d）：9 个 session.* method 越权 403，未注册 ID fail-closed
+- ✅ T10 WS upgrade 验 token（eddec86）：events.mux/host 握手验 JWT（Bearer 头或 ?token=），无 token 401、有效 101 实测
+- ✅ T11 登录页真实登录（a34a934）：POST /workbench → 后端 /api/auth/login，真 JWT + HttpOnly cookie；错误凭证 401 实测
+- T12（后续）前端适配：dsh web 客户端 WS URL 加 ?token=、fetch 附 Authorization、fence 增加 cookie 解析分支（当前 token 需手动带入）
+- T6 自建 provider 网关（配额/计费，加投阶段）
+- 部署化：preset 随容器预置（$DSH_HOME/.agent-presets）+ 每班一 host 横向切
