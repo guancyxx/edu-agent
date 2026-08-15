@@ -112,6 +112,6 @@ dsh 自身无认证（官方明示：No TLS, auth, or origin policy）。方案�
 - ✅ T9 session 粒度防护（874777d）：9 个 session.* method 越权 403，未注册 ID fail-closed
 - ✅ T10 WS upgrade 验 token（eddec86）：events.mux/host 握手验 JWT（Bearer 头或 ?token=），无 token 401、有效 101 实测
 - ✅ T11 登录页真实登录（a34a934）：POST /workbench → 后端 /api/auth/login，真 JWT + HttpOnly cookie；错误凭证 401 实测
-- T12（后续）前端适配：dsh web 客户端 WS URL 加 ?token=、fetch 附 Authorization、fence 增加 cookie 解析分支（当前 token 需手动带入）
+- ✅ T12 前端无感认证（366be36）：tapIndex 注入 AUTH_SHIM（fetch/WebSocket 自动带 token + 401 踢回登录页）+ fence cookie 分支 + 登录页存 localStorage 跳主页。浏览器全流程实测：表单登录→自动跳转→无显式头 fetch 200。dsh 仓库零改动。
 - T6 自建 provider 网关（配额/计费，加投阶段）
 - 部署化：preset 随容器预置（$DSH_HOME/.agent-presets）+ 每班一 host 横向切
