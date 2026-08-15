@@ -60,7 +60,11 @@ on Node >= 24 (Node 22 hits `ERR_REQUIRE_CYCLE_MODULE` importing the .ts entry).
 
 ## Remaining work
 
-- Real JWT verification (edu-agent FastAPI) instead of header-presence check
-- Login page actually obtains/stores the token host-side (bind to connection/session)
-- WebSocket upgrade routes (/api/events.*) are not token-fenced yet
-- Session owner stamping + list filtering (plan §3.2) — separate plugin/layer
+- ~~Real JWT verification~~ — DONE (T8): HS256 + expiry via `src/jwt.ts`
+  (`node:crypto`, no deps); secret from `EDU_JWT_SECRET` (same default
+  fallback as the backend). Live-verified: no/tampered/expired/garbage
+  tokens all answer 401.
+- Login page actually obtains/stores the token host-side (bind to
+  connection/session) — plan §8 T11
+- WebSocket upgrade routes (/api/events.*) are not token-fenced yet —
+  plan §8 T10

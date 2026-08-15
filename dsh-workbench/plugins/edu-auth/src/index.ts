@@ -13,12 +13,15 @@
  * registration, for load-order robustness) with an Authorization check that
  * answers 401 before the trust fence/bridge run.
  *
- * Token validation is a placeholder: a non-empty `Authorization: Bearer <t>`
- * header passes. Real JWT verification against the edu-agent backend comes
- * later; see the plugin README.
+ * Token validation is real JWT verification (T8): HS256 signature and expiry
+ * are checked against EDU_JWT_SECRET (same secret the edu-agent backend signs
+ * with; falls back to the backend's own default when unset). Hand-rolled with
+ * node:crypto in ./jwt — no dependencies.
  */
 
 import type { Context } from '@deepseek-ai/cordis'
+
+import { bearerClaims } from './jwt.ts'
 
 export const name = 'edu-auth'
 export const inject = ['webServer']
@@ -54,11 +57,10 @@ const LOGIN_PAGE = `<!doctype html>
 </html>
 `
 
-/** True when the request carries a bearer token (placeholder validation). */
-function hasBearerToken(req: { headers: { authorization?: string | string[] } }): boolean {
-  const header = req.headers.authorization
-  const value = Array.isArray(header) ? header[0] : header
-  return typeof value === 'string' && /^Bearer\s+.+$/i.test(value.trim())
+/** Verify the bearer JWT (HS256 signature + expiry) against EDU_JWT_SECRET. */
+function validAuth(req: { headers: { authorization?: string | string[] } }): boolean {
+  const secret = process.env['EDU_JWT_SECRET'] ?? 'change-me-in-production'
+  return bearerClaims(req.headers.authorization, secret) !== undefined
 }
 
 export function apply(ctx: Context): void {
@@ -90,9 +92,9 @@ export function apply(ctx: Context): void {
       writeHead: (status: number, headers?: Record<string, string>) => void
       end: (body?: string) => void
     }) => void | Promise<void> => async (req, res) => {
-      if (!hasBearerToken(req)) {
+      if (!validAuth(req)) {
         res.writeHead(401, { 'content-type': 'text/plain; charset=utf-8', 'www-authenticate': 'Bearer' })
-        res.end('unauthorized: missing bearer token')
+        res.end('unauthorized: missing or invalid bearer token')
         return
       }
       return handler(req as never, res as never)

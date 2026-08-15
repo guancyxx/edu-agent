@@ -2,4 +2,4 @@
 # Mount with: dsh --profile web --port 3084 --patch edu-auth/cordis.yml --patch this-file
 - insert:
     - id: edu-session-owner
-      name: '/Users/guanchunyuan/workspace/edu-agent/dsh-workbench/plugins/edu-session-owner/src/index.ts'
+      name: '/tmp/edu-agent-t8/dsh-workbench/plugins/edu-session-owner/src/index.ts'

@@ -4,9 +4,10 @@
  *
  * Stacks on top of edu-auth (does not modify it): this plugin wraps the same
  * `/api` prefix WebRoute handler seam that edu-auth fences and assumes the
- * bearer token has already been checked. Identity is placeholder-resolved —
- * the token itself is the user_id (e.g. "student-a"); real JWT parsing comes
- * later. Load this patch alongside/after edu-auth.
+ * bearer token has already been verified. Identity comes from the JWT `sub`
+ * claim (T8): the edu-auth fence guarantees a valid HS256-signed,
+ * unexpired token, so this plugin only needs to re-extract the claim with the
+ * same hand-rolled verifier. Load this patch alongside/after edu-auth.
  *
  * Wire format (verified against packages/client/connection/src/rpc-host.ts,
  * packages/host/apiproxy/src/fetch/handler.ts, and live curl):
@@ -40,6 +41,8 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 
+import { bearerClaims } from './jwt.ts'
+
 export const name = 'edu-session-owner'
 export const inject = ['webServer']
 
@@ -64,12 +67,10 @@ interface NodeRes {
 
 type RouteHandler = (req: never, res: never) => void | Promise<void>
 
-/** Extract the bearer token's user_id (placeholder: token == user_id). */
+/** Extract the caller's user_id from the verified JWT's `sub` claim (T8). */
 function userFromAuth(header: string | string[] | undefined): string | undefined {
-  const value = Array.isArray(header) ? header[0] : header
-  if (typeof value !== 'string') return undefined
-  const match = /^Bearer\s+(.+)$/i.exec(value.trim())
-  return match === null ? undefined : match[1].trim()
+  const secret = process.env['EDU_JWT_SECRET'] ?? 'change-me-in-production'
+  return bearerClaims(header, secret)?.sub
 }
 
 function isClientRequest(body: unknown): body is { type: string; method: string; payload: unknown } {
@@ -80,8 +81,27 @@ function isClientRequest(body: unknown): body is { type: string; method: string;
 
 interface ServerResponseWire {
   type?: string
-  result?: { ok?: boolean; value?: unknown }
+  rpcId?: string
+  result?: { ok?: boolean; value?: unknown; error?: unknown }
 }
+
+/**
+ * session.* methods that act on one existing session (T9). The payload's
+ * sessionId names the target; a caller whose user_id is not the session's
+ * recorded owner is rejected before the inner handler runs. Fail-closed:
+ * a session with no recorded owner is owned by nobody.
+ */
+const SESSION_SCOPED_METHODS = new Set([
+  'session.history',
+  'session.models',
+  'session.selectModel',
+  'session.rename',
+  'session.fork',
+  'session.prompt',
+  'session.attachment',
+  'session.updateQueue',
+  'session.cancel',
+])
 
 /** sessionId → owner sidecar, persisted under DSH_HOME. */
 class OwnerRegistry {
@@ -201,6 +221,14 @@ export function apply(ctx: Context): void {
                 registry.set(value.sessionId, owner)
                 log(`edu-session-owner: session ${value.sessionId} owner=${owner}`)
               }
+            } else if (method === 'session.fork') {
+              // The fork's new sessionId is owned by the fork caller (who was
+              // already verified as the source session's owner).
+              const value = wire.result.value as { sessionId?: unknown } | undefined
+              if (typeof value?.sessionId === 'string') {
+                registry.set(value.sessionId, owner)
+                log(`edu-session-owner: fork ${value.sessionId} owner=${owner}`)
+              }
             } else {
               const value = wire.result.value as { items?: unknown } | undefined
               if (Array.isArray(value?.items)) {
@@ -225,6 +253,17 @@ export function apply(ctx: Context): void {
       res.end(out)
     }
 
+    /**
+     * Answer 403 with a plain-text body — used for owner-mismatch on
+     * session-scoped methods (the JSON envelope the carrier would produce is
+     * unnecessary because the request is rejected before it reaches RPC).
+     */
+    function denyForbidden(res: NodeRes, owner: string, sessionId: string, method: string): void {
+      log(`edu-session-owner: DENY ${method} user=${owner} session=${sessionId} (not owner)`)
+      res.writeHead(403, { 'content-type': 'text/plain; charset=utf-8' })
+      res.end('forbidden: session belongs to another user')
+    }
+
     /** Wrap one /api route handler with owner-aware envelope rewriting. */
     function wrapHandler(handler: RouteHandler): (req: NodeReq, res: NodeRes) => void | Promise<void> {
       return async (req, res) => {
@@ -232,7 +271,8 @@ export function apply(ctx: Context): void {
         const pathname = req.url === undefined ? '' : new URL(req.url, 'http://dsh.internal').pathname
         const method = pathname.startsWith(`${API_PREFIX}/`) ? pathname.slice(API_PREFIX.length + 1) : undefined
         const intercepted = owner !== undefined && method !== undefined
-          && (method === 'session.create' || method === 'session.list' || method === 'session.search')
+          && (method === 'session.create' || method === 'session.list' || method === 'session.search'
+            || SESSION_SCOPED_METHODS.has(method))
           && (req.method ?? '') === 'POST'
           && (req.headers['content-type']?.split(';', 1)[0]?.trim().toLowerCase() ?? '') === 'application/json'
 
@@ -271,7 +311,25 @@ export function apply(ctx: Context): void {
           await handler(replayReq as never, res as never)
           return
         }
-        await interceptRpc(handler, req, res, body, owner, method)
+
+        // T9: session-scoped methods — reject before the handler runs when the
+        // caller is not the session's recorded owner (fail-closed for sessions
+        // without a recorded owner). The method in the body must match the
+        // path (the carrier enforces this too; rejecting early is equivalent).
+        if (method !== undefined && SESSION_SCOPED_METHODS.has(method)) {
+          const payload = (parsed as { payload?: unknown }).payload
+          const sessionId = typeof payload === 'object' && payload !== null
+            ? (payload as Record<string, unknown>)['sessionId']
+            : undefined
+          if (typeof sessionId !== 'string' || sessionId.length === 0) {
+            // Malformed target: let the inner handler produce its own error.
+          } else if (registry.get(sessionId) !== owner) {
+            denyForbidden(res, owner, sessionId, method)
+            return
+          }
+        }
+
+        await interceptRpc(handler, req, res, body, owner, method as string)
       }
     }
 

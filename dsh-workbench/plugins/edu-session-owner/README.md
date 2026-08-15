@@ -13,9 +13,10 @@ ran (load both patches).
 
 ## What it does
 
-1. **token → user_id (placeholder)**: the bearer token itself is the user_id
-   (e.g. `Bearer student-a` → `student-a`). Real JWT parsing against the
-   edu-agent backend is future work (same placeholder stance as edu-auth).
+1. **JWT → user_id (T8)**: the bearer token is a real edu-agent backend JWT
+   (HS256); `src/jwt.ts` (node:crypto, no deps) verifies signature and expiry
+   against `EDU_JWT_SECRET` (backend's `EDU_SECRET_KEY`; same default
+   fallback), then the user_id is the `sub` claim.
 2. **Owner stamping on `session.create`**: after the real handler succeeds,
    the returned `sessionId` is recorded in an owner registry — in-memory for
    the boot, plus a JSON sidecar at `$DSH_HOME/edu-session-owners.json` so
@@ -24,6 +25,13 @@ ran (load both patches).
    `value.items` is filtered to sessions whose owner equals the calling
    token's user_id. Sessions with no recorded owner (pre-plugin legacy
    sessions) are hidden from everyone — fail-closed.
+4. **Per-session guard (T9)**: `session.history`, `session.models`,
+   `session.selectModel`, `session.rename`, `session.fork`,
+   `session.prompt`, `session.attachment`, `session.updateQueue`, and
+   `session.cancel` each name a target `sessionId` in their payload; a
+   caller who is not that session's recorded owner gets `403 forbidden`
+   before the inner handler runs (fail-closed for unregistered ids).
+   `session.fork`'s new sessionId is stamped to the fork caller.
 
 ## Mechanism (wire-level, verified live)
 
@@ -53,9 +61,12 @@ response:
   `owner` in the registry.
 - `session.list` / `session.search` → filter `value.items` by
   `registry.get(sessionId) === owner`.
+- session-scoped methods (`session.history` etc., see above) → check
+  `registry.get(payload.sessionId) === owner` **before** replaying into the
+  handler; mismatch answers 403 and the handler never runs.
 
-Everything else (prompt, history, SSE streams, workspaces, …) passes through
-untouched. No dsh core files are modified.
+Everything else (SSE streams, workspaces, …) passes through untouched. No
+dsh core files are modified.
 
 ## Known limitation: no session metadata channel
 
@@ -109,11 +120,14 @@ curl -s -X POST localhost:3084/api/session.list \
 
 ## Remaining work
 
-- Real JWT verification + `user_id` extraction (replace token==user_id)
-- Enforce owner on per-session reads/writes (`session.history`,
-  `session.prompt`, `session.rename`, `session.fork`, …) — currently only
-  list/search are filtered, so a student who learns another's sessionId can
-  still address it directly
-- WebSocket/SSE event streams are not owner-scoped
+- ~~Real JWT verification + `user_id` extraction~~ — DONE (T8): HS256 verify
+  (signature + expiry, timing-safe compare) in `src/jwt.ts`; `sub` claim is
+  the user id
+- ~~Enforce owner on per-session reads/writes~~ — DONE (T9): the
+  `SESSION_SCOPED_METHODS` guard answers 403 before the handler runs
+  (history/models/selectModel/rename/fork/prompt/attachment/updateQueue/
+  cancel); unregistered sessionIds are denied by default (fail-closed)
+- WebSocket/SSE event streams are not owner-scoped yet (upgrade handshake
+  carries no Authorization check — plan §8 T10)
 - Migrate the sidecar into a proper per-user session store once dsh grows a
   metadata channel
