@@ -4,6 +4,8 @@
  *
  * Function A: serves a minimal English login page at GET /workbench.
  * Function B: rejects every /api HTTP request that carries no bearer token.
+ * Function C (T10): rejects the /api/events.mux and /api/events.host
+ *   WebSocket upgrades when the handshake carries no valid JWT.
  *
  * Mechanism note (researched in T2): the Typert `/api` interceptor seat is
  * single-holder and already occupied by typert-gateway in the default web
@@ -17,17 +19,26 @@
  * are checked against EDU_JWT_SECRET (same secret the edu-agent backend signs
  * with; falls back to the backend's own default when unset). Hand-rolled with
  * node:crypto in ./jwt — no dependencies.
+ *
+ * T10 upgrade fence: client-connection registers the two WS event routes via
+ * `webServer.registerUpgrade` (exact path; duplicates throw), so the same
+ * monkey-patch strategy used for the HTTP fence applies — wrap
+ * `registerUpgrade` so handlers are fenced at registration time, plus wrap
+ * any already-registered entries for load-order robustness. Browsers cannot
+ * set custom headers on a WS handshake, so the token is accepted from the
+ * `Authorization` header OR a `?token=` query parameter.
  */
 
 import type { Context } from '@deepseek-ai/cordis'
 
-import { bearerClaims } from './jwt.ts'
+import { bearerClaims, verifyJwt } from './jwt.ts'
 
 export const name = 'edu-auth'
 export const inject = ['webServer']
 
 const API_PREFIX = '/api'
 const WORKBENCH_PATH = '/workbench'
+const WS_EVENTS_PATHS = new Set(['/api/events.mux', '/api/events.host'])
 
 const LOGIN_PAGE = `<!doctype html>
 <html lang="en">
@@ -67,6 +78,7 @@ export function apply(ctx: Context): void {
   ctx.inject(['webServer'], (webCtx) => {
     const webServer = webCtx.webServer as unknown as {
       register: (route: { kind: string; path: string; handler: unknown }) => () => void
+      registerUpgrade: (route: { path: string; handler: unknown }) => () => void
       prefixes: Map<string, { kind: string; path: string; handler: unknown }>
     }
 
@@ -117,8 +129,78 @@ export function apply(ctx: Context): void {
     }
     restore.push(() => { webServer.register = originalRegister })
 
+    // ── Function C (T10): token fence over the WS upgrade routes ──
+    // client-connection registers /api/events.mux and /api/events.host via
+    // webServer.registerUpgrade (exact path). Duplicate paths throw, so we
+    // cannot re-register; instead patch registerUpgrade so the handler is
+    // wrapped at registration time, and wrap any already-registered route.
+    type UpgradeHandler = (req: { headers: { authorization?: string | string[] }, url?: string }, socket: {
+      end: (data: string) => void
+    }, head: Buffer) => void | Promise<void>
+    const fenceUpgrade = (handler: UpgradeHandler): UpgradeHandler =>
+      (req, socket, head) => {
+        if (upgradeToken(req) === undefined) {
+          rejectUpgradeUnauthorized(socket)
+          return
+        }
+        return handler(req, socket, head)
+      }
+
+    // If client-connection registered the upgrade routes before this plugin
+    // applied, wrap the live Map entries now (`upgrades` is TS-private only);
+    // the registerUpgrade patch below covers the normal load order.
+    const upgradesMap = (webServer as unknown as {
+      upgrades?: Map<string, { handler: unknown }>
+    }).upgrades
+    const wrappedUpgrades: Array<{ entry: { handler: unknown }, original: UpgradeHandler }> = []
+    if (upgradesMap instanceof Map) {
+      for (const entry of upgradesMap.values()) {
+        if (typeof entry.handler === 'function') {
+          const original = entry.handler as UpgradeHandler
+          entry.handler = fenceUpgrade(original)
+          wrappedUpgrades.push({ entry, original })
+        }
+      }
+      restore.push(() => {
+        for (const { entry, original } of wrappedUpgrades) entry.handler = original
+      })
+    }
+
+    const originalRegisterUpgrade = webServer.registerUpgrade.bind(webServer)
+    webServer.registerUpgrade = (route) => {
+      if (WS_EVENTS_PATHS.has(route.path) && typeof route.handler === 'function') {
+        const original = route.handler as UpgradeHandler
+        route.handler = fenceUpgrade(original)
+      }
+      return originalRegisterUpgrade(route)
+    }
+    restore.push(() => { webServer.registerUpgrade = originalRegisterUpgrade })
+
     webCtx.effect(() => () => {
       for (const undo of restore.reverse()) undo()
     }, 'edu-auth: teardown')
   })
+}
+
+/** Token for a WS upgrade: Authorization header first, then ?token= query. */
+function upgradeToken(req: { headers: { authorization?: string | string[] }, url?: string }): symbol | undefined {
+  const secret = process.env['EDU_JWT_SECRET'] ?? 'change-me-in-production'
+  if (bearerClaims(req.headers.authorization, secret) !== undefined) return Symbol('header')
+  const url = new URL(req.url ?? '/', 'http://x')
+  const token = url.searchParams.get('token')
+  if (token !== null && verifyJwt(token, secret) !== undefined) return Symbol('query')
+  return undefined
+}
+
+/** Raw-socket 401 — mirrors client-connection's rejectWebSocketUpgrade (403). */
+function rejectUpgradeUnauthorized(socket: { end: (data: string) => void }): void {
+  socket.end([
+    'HTTP/1.1 401 Unauthorized',
+    'Connection: close',
+    'WWW-Authenticate: Bearer',
+    'Content-Type: text/plain; charset=utf-8',
+    'Content-Length: 27',
+    '',
+    'unauthorized: token required',
+  ].join('\r\n'))
 }
