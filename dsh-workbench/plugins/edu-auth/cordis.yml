@@ -1,8 +1,8 @@
 # edu-auth plugin patch overlay for the dsh web profile.
 # Mount with: node --import tsx/esm apps/cli/src/bin.ts --profile web \
-#   --patch <this file> --port 3088
-# Path points inside this worktree (/tmp/edu-agent-t10) so the checkout under
+#   --patch <this file> --port 3089
+# Path points inside this worktree (/tmp/edu-agent-t12) so the checkout under
 # ~/workspace/edu-agent is never touched while running the instance.
 - insert:
     - id: edu-auth
-      name: '/tmp/edu-agent-t10/dsh-workbench/plugins/edu-auth/src/index.ts'
+      name: '/tmp/edu-agent-t12/dsh-workbench/plugins/edu-auth/src/index.ts'

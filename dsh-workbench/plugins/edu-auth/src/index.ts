@@ -8,7 +8,16 @@
  *   WebSocket upgrades when the handshake carries no valid JWT.
  * Function D (T11): POST /workbench with username/password form data is
  *   forwarded to the edu-agent backend {EDU_BASE_URL}/api/auth/login; on
- *   success the token is shown to the user and set as an HttpOnly cookie.
+ *   success the token is set as an HttpOnly cookie.
+ * Function E (T12): seamless browser auth —
+ *   - the login success page stores the JWT in localStorage('edu_token')
+ *     and redirects to '/' (the workbench index);
+ *   - webServer.tapIndex() injects an inline script into every index.html
+ *     that patches window.fetch (add Authorization: Bearer) and
+ *     window.WebSocket (append ?token=) for same-origin requests, and
+ *     bounces to /workbench on a 401 (expired token);
+ *   - both fences additionally accept `Cookie: edu_token=<jwt>` when no
+ *     Authorization header is present (double coverage with localStorage).
  *
  * Mechanism notes:
  * - HTTP fence: the `/api` prefix WebRoute registered by client-connection is
@@ -45,16 +54,34 @@ const LOGIN_TIMEOUT_MS = 10_000
 /** Verify the bearer JWT (HS256 signature + expiry) against EDU_JWT_SECRET. */
 function validAuth(req: { headers: { authorization?: string | string[] } }): boolean {
   const secret = process.env['EDU_JWT_SECRET'] ?? 'change-me-in-production'
-  return bearerClaims(req.headers.authorization, secret) !== undefined
+  if (bearerClaims(req.headers.authorization, secret) !== undefined) return true
+  return cookieToken(req) !== undefined && verifyJwt(cookieToken(req) as string, secret) !== undefined
 }
 
-/** Token for a WS upgrade: Authorization header first, then ?token= query. */
-function upgradeToken(req: IncomingMessage): string | undefined {
+/**
+ * Cookie: edu_token=<jwt> fallback (T12) — the login flow already drops an
+ * HttpOnly edu_token cookie; accept it when no Authorization header exists.
+ */
+function cookieToken(req: { headers: Record<string, unknown> }): string | undefined {
+  const raw = req.headers['cookie']
+  if (typeof raw !== 'string') return undefined
+  for (const part of raw.split(';')) {
+    const eq = part.indexOf('=')
+    if (eq === -1) continue
+    if (part.slice(0, eq).trim() === 'edu_token') return part.slice(eq + 1).trim()
+  }
+  return undefined
+}
+
+/** Token for a WS upgrade: Authorization header, ?token= query, or cookie. */
+function upgradeToken(req: IncomingMessage): 'header' | 'query' | 'cookie' | undefined {
   const secret = process.env['EDU_JWT_SECRET'] ?? 'change-me-in-production'
   if (bearerClaims(req.headers.authorization, secret) !== undefined) return 'header'
   const url = new URL(req.url ?? '/', 'http://x')
   const token = url.searchParams.get('token')
   if (token !== null && verifyJwt(token, secret) !== undefined) return 'query'
+  const cookie = cookieToken(req)
+  if (cookie !== undefined && verifyJwt(cookie, secret) !== undefined) return 'cookie'
   return undefined
 }
 
@@ -123,6 +150,63 @@ const LOGIN_FORM = page(`<form method="post" action="/workbench">
 
 interface BackendAuthResponse { access_token?: string, user?: { username?: string } }
 
+/**
+ * T12 inline script injected into every index.html via webServer.tapIndex().
+ * Small (<60 lines), zero dependencies, ES2020. Behaviour:
+ * - window.fetch patch: same-origin + localStorage token + no Authorization
+ *   header already set → add `Authorization: Bearer <token>`; a 401 clears
+ *   the token and bounces to /workbench.
+ * - window.WebSocket patch: /api/events.* URLs get `?token=<jwt>` appended.
+ * The HttpOnly edu_token cookie rides along as server-side double coverage.
+ */
+const AUTH_SHIM = `<script>
+(function () {
+  'use strict'
+  function token() {
+    try { return localStorage.getItem('edu_token') || '' } catch (e) { return '' }
+  }
+  function bounceToLogin() {
+    try { localStorage.removeItem('edu_token') } catch (e) {}
+    if (location.pathname !== '/workbench') location.replace('/workbench')
+  }
+  var rawFetch = window.fetch
+  if (typeof rawFetch === 'function') {
+    window.fetch = function (input, init) {
+      init = init || {}
+      var url = typeof input === 'string' ? input : (input && input.url) || ''
+      var sameOrigin = url.indexOf('/') === 0
+        || new URL(url, location.origin).origin === location.origin
+      var t = token()
+      var hasAuth = (init.headers && init.headers.Authorization) || false
+      if (sameOrigin && t && !hasAuth && url.indexOf('/api/') !== -1) {
+        var h = new Headers(init.headers || {})
+        h.set('Authorization', 'Bearer ' + t)
+        init.headers = h
+      }
+      return rawFetch.call(window, input, init).then(function (res) {
+        if (res && res.status === 401 && sameOrigin) bounceToLogin()
+        return res
+      })
+    }
+  }
+  var RawWS = window.WebSocket
+  if (typeof RawWS === 'function') {
+    window.WebSocket = function (url, protocols) {
+      var t = token()
+      if (t && typeof url === 'string' && url.indexOf('/api/events.') !== -1) {
+        url += (url.indexOf('?') === -1 ? '?' : '&') + 'token=' + encodeURIComponent(t)
+      }
+      return protocols === undefined ? new RawWS(url) : new RawWS(url, protocols)
+    }
+    window.WebSocket.prototype = RawWS.prototype
+    window.WebSocket.OPEN = RawWS.OPEN
+    window.WebSocket.CONNECTING = RawWS.CONNECTING
+    window.WebSocket.CLOSING = RawWS.CLOSING
+    window.WebSocket.CLOSED = RawWS.CLOSED
+  }
+})()
+</script>`
+
 /** Forward credentials to {EDU_BASE_URL}/api/auth/login; token or error. */
 async function backendLogin(
   username: string,
@@ -159,6 +243,20 @@ export function apply(ctx: Context): void {
     }
 
     const restore: Array<() => void> = []
+
+    // ── Function E (T12): inject the auth shim into every index.html ──
+    // tapIndex transforms are applied by the fallback owner to every index
+    // response — the official no-touch injection channel for browser scripts.
+    const webServerFull = webServer as unknown as {
+      tapIndex?: (transform: (html: string) => string) => () => void
+    }
+    if (typeof webServerFull.tapIndex === 'function') {
+      const untap = webServerFull.tapIndex((html: string) =>
+        html.includes('</head>')
+          ? html.replace('</head>', `${AUTH_SHIM}</head>`)
+          : AUTH_SHIM + html)
+      restore.push(untap)
+    }
 
     // ── Function A + D: login page and form-POST login at /workbench ──
     restore.push(webCtx.effect(() => webServer.register({
@@ -208,15 +306,22 @@ export function apply(ctx: Context): void {
 <p><a href="/workbench">Back to sign in</a></p>`))
           return
         }
-        // Success: show the token AND drop it as an HttpOnly cookie so the
-        // browser attaches it to same-origin requests automatically.
+        // Success: store the token where the injected front-end script reads
+        // it (localStorage), drop the HttpOnly cookie for the fence's cookie
+        // branch, then land on the workbench index — the tapIndex-injected
+        // patch makes every subsequent fetch/WS request carry the token.
         res.writeHead(200, {
           'content-type': 'text/html; charset=utf-8',
           'set-cookie': `edu_token=${result.token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=86400`,
         })
         res.end(page(`<h1>Signed in as ${result.username}</h1>
-<p>Save this bearer token for API access (it is also stored in the <code>edu_token</code> cookie):</p>
-<div class="token">${result.token}</div>
+<p>Signing you in…</p>
+<script>
+  try { localStorage.setItem('edu_token', ${JSON.stringify(result.token)}) } catch (e) {}
+  location.replace('/')
+</script>
+<noscript><p>JavaScript is disabled — copy this bearer token manually:</p>
+<div class="token">${result.token}</div></noscript>
 <p><a href="/workbench">Sign out</a></p>`))
       },
     }), 'edu-auth: /workbench login page'))
