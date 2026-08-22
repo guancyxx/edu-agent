@@ -31,3 +31,7 @@ docker/volumes/
 
 # LangSmith
 .langsmith/
+
+# DSH workbench runtime state (contains .credentials.yaml — never commit)
+dsh-workbench/.dsh-home/
+dsh-workbench/spike/
