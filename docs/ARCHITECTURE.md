@@ -1,5 +1,8 @@
 # EduAgent Architecture
 
+> 这份文档写的是**当前架构**。CDUT v2 原始方案（`cdut_stu_agents@2c0817b`）里还剩多少有效、
+> 哪些已作废、剩余投入怎么分桶，见 [V2-SCOPE.md](V2-SCOPE.md) —— 排期以那份为准。
+
 ## Overview
 
 EduAgent uses **LangGraph** as the core agent engine for K12 adaptive tutoring.

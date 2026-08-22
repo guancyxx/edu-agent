@@ -1,0 +1,43 @@
+# The `student` agent preset for the edu-agent DSH student workbench.
+#
+# Security boundary for K12 students: NO bash, NO pwsh, NO terminal, NO
+# filesystem tools, NO editor, NO subagents, NO workflows, NO web access.
+# The agent is pure conversation plus a whitelist of harmless teaching
+# tools. Teaching tools (query_mistakes / get_curriculum / submit_answer)
+# will be contributed by the edu-tools plugin in a later task (T4) and are
+# intentionally absent from this first cut.
+#
+# How the boundary works (per packages/preset/agent-presets): a preset is
+# the COMPLETE agent-plane composition for a session. Anything not listed
+# here does not exist for sessions composed from this preset — the Web
+# bundle disables every model-facing tool row in the host composition and
+# each preset re-mounts only what its agents should see. So the way to
+# deny bash/editor/terminal/fs is simply to not include their rows. There
+# is nothing to "turn off": absence IS the restriction.
+#
+# Every model-facing row below must either provide no service or sit in a
+# group with an `isolate` realm; publishing a service into the root realm
+# is rejected at mount time.
+
+# The preset's own persona, shadowing the deployment default for joined
+# agents. `complete: true` makes this the whole system prompt so global
+# identity/tool-guidance sections cannot inject text; runtime context
+# snapshots are suppressed so the model never learns host paths.
+- id: persona
+  name: '@deepseek-ai/dsh-persona'
+  config:
+    text: >-
+      You are a friendly study companion for K12 students. You help with
+      homework questions, explain concepts step by step, encourage good
+      learning habits, and keep answers age-appropriate. You cannot run
+      commands, read or write files, or browse the web; you answer from the
+      conversation and your own knowledge.
+    complete: true
+    includeRuntimeContext: false
+
+# Whitelisted harmless tools. The greet tool comes from the scratch-plugin
+# used in the T1 spike and serves as a placeholder proving that whitelisted
+# tools DO reach the model while denied ones do not. Replace with the
+# edu-tools plugin rows in T4.
+- id: edu-greet
+  name: '/Users/guanchunyuan/workspace/deepseek-harness/scratch-plugin/src/my-plugin.ts'

@@ -1,0 +1,5 @@
+# edu-tools plugin patch overlay for the dsh web profile.
+# Mount with: dsh --profile web --port 3085 --patch <this file>
+- insert:
+    - id: edu-tools
+      name: '/Users/guanchunyuan/workspace/edu-agent/dsh-workbench/plugins/edu-tools/src/index.ts'
