@@ -116,6 +116,20 @@ class SessionCreate(BaseModel):
     subject: str = "math"
     title: Optional[str] = None
 
+    @staticmethod
+    def _validate(v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return None
+        v = v.strip()
+        return v[:40] or None
+
+    # Keep subject within DB String(32) and title sane; avoid 500s from
+    # oversized values (audit N6).
+    def __init__(self, **data):
+        super().__init__(**data)
+        self.subject = (self.subject or "math").strip()[:32]
+        self.title = self._validate(self.title)
+
 
 class SessionOut(BaseModel):
     id: str
@@ -275,8 +289,13 @@ async def judge_answer(
         m = _re.search(r"\{[\s\S]*\}", text)
         if m:
             data = json.loads(m.group(0))
+            # STRICT bool: only JSON `true` counts as correct. bool("false")
+            # would be truthy — a wrong answer judged correct + skipped from
+            # the mistake notebook. Anything else falls through to 502 below.
+            if data.get("correct") is not True and data.get("correct") is not False:
+                raise ValueError("judge returned non-boolean 'correct'")
             return JudgeResponse(
-                correct=bool(data.get("correct")),
+                correct=data["correct"] is True,
                 feedback=str(data.get("feedback", ""))[:200],
                 correct_answer=str(data["correct_answer"])[:200] if data.get("correct_answer") else None,
             )

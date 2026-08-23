@@ -153,7 +153,10 @@ async function submit() {
       feedback = '暂时无法连接判定服务，请稍后重试。'
     }
 
-    if (!correct) {
+    // Only record to the mistake notebook when we actually judged it wrong.
+    // During a judge outage (judged=false) recording would pollute SM-2
+    // scheduling with correct answers.
+    if (judged && !correct) {
       try {
         const r = await fetch('http://localhost:8000/api/mistakes', {
           method: 'POST',

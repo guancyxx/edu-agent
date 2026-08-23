@@ -145,8 +145,15 @@ const gridCols = computed(() => {
   return `minmax(200px, 240px) ${w('chat')} ${w('board')}`
 })
 
-// ── Markdown rendering (safe SVG whitelist) — unchanged from previous version ──
+// ── Markdown rendering (minimal, safe) ──────────────────────
 
+// Extract self-contained <svg>...</svg> blocks before escaping, so diagrams render raw.
+// Security: only pure-shape SVG allowed — any block containing <script>, on* handlers,
+// script-scheme / external / data: URLs, animate-based attribute mutation, or CSS url()
+// loaders is dropped entirely (fail-closed). See AUDIT note in PR #3.
+// NOTE (audit N3, restored): this scrub passed a Critical XSS audit — the probe tests
+// the raw block AND its entity-decoded form (browser decodes &#106; at parse time);
+// url(#fragment) refs to in-svg defs are whitelisted; do not weaken without re-audit.
 const SVG_OPEN_RE = /<svg\b[^>]*>/
 
 function extractSvgs(text: string): { text: string, svgs: string[] } {
