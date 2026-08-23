@@ -251,7 +251,7 @@ async def execute_node(state: TutorState) -> dict[str, Any]:
 
     # Try to load the skill and render its template
     try:
-        from app.skills.runner import run_atom
+        from app.skills.runner import run
 
         skill_meta = _get_skill(skill_name)
         if skill_meta is not None:
@@ -268,7 +268,7 @@ async def execute_node(state: TutorState) -> dict[str, Any]:
                 skill_state["concept_id"] = params.get("concept_id", "")
                 skill_state["problem_context"] = params.get("problem_context", "") or user_text
 
-            result = await run_atom(skill_meta, skill_state, llm)
+            result = await run(skill_meta, skill_state, llm)
             logger.info("execute_node: skill=%s comprehension=%s", skill_name, result.comprehension)
             return {
                 "skill_output": result.output,

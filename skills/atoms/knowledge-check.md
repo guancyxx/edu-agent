@@ -34,6 +34,10 @@ Generate 2 questions at different difficulty levels:
 - Subject: {{ subject }}
 - Grade: {{ grade }}
 - Student ability: {{ ability_level }}
+{% if previous_output %}
+- 刚讲过的内容（上一步输出，检测问题应围绕它出）：
+{{ previous_output }}
+{% endif %}
 
 ## Output Format
 
