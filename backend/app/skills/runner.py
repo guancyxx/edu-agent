@@ -84,9 +84,16 @@ async def run_molecule(
     *,
     system_prompt: str | None = None,
 ) -> SkillResult:
-    """Execute a molecule skill. Currently delegates to run_atom."""
-    logger.debug("Running molecule skill %r as atom (subgraph pending)", skill.name)
-    return await run_atom(skill, state, llm, system_prompt=system_prompt)
+    """Expand frontmatter ``steps`` into a linear LangGraph subgraph.
+
+    Thin delegate — the real implementation (graph builder, step-state
+    chaining, output synthesis, topology cache) lives in
+    :mod:`app.skills.molecule`. Imported lazily here to avoid a circular
+    import (molecule.py imports run_atom/render_prompt from this module).
+    """
+    from .molecule import run_molecule as _run_molecule
+
+    return await _run_molecule(skill, state, llm, system_prompt=system_prompt)
 
 
 async def run(
