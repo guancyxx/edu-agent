@@ -152,16 +152,52 @@ async def assess_node(state: TutorState) -> dict[str, Any]:
 async def router_node(state: TutorState) -> dict[str, Any]:
     """Select which skill should handle this turn.
 
-    1. Emotion short-circuit: frustration > 0.7 → ``emotion-respond``.
-    2. Otherwise delegate to the ``skill-selector`` meta-skill (LLM call) that
+    1. Visual-request short-circuit: explicit "draw me a picture" phrasing →
+       ``picture-explain`` (a confused student asking for a diagram gets the
+       diagram — the picture IS the confusion-recovery tool, so this outranks
+       the emotion gate).
+    2. Emotion short-circuit: frustration > 0.7 → ``emotion-respond``.
+    3. Otherwise delegate to the ``skill-selector`` meta-skill (LLM call) that
        picks from the catalog, filtered by subject.
-    3. Fallback to ``concept-explain`` if the LLM decision is invalid.
+    4. Fallback to ``concept-explain`` if the LLM decision is invalid.
     """
     emotion = state.get("emotion_state", {}) or {}
     frustration = float(emotion.get("frustration", 0.0))
     confusion = float(emotion.get("confusion", 0.0))
 
-    # 1. Emotion short-circuit
+    # 1. Deterministic picture-explain short-circuit: an explicit visual request
+    # (画个图/图解/看图讲) routes straight to picture-explain instead of gambling
+    # on the LLM selector picking it from a text-only description. Runs BEFORE the
+    # emotion gate on purpose (audit note, PR #3): a student with confusion > 0.8
+    # who explicitly asks for a picture wants the picture.
+    _message = ""
+    _msgs = state.get("messages") or []
+    if _msgs:
+        _last = _msgs[-1]
+        _content: object = (
+            getattr(_last, "content", _last) if not isinstance(_last, dict)
+            else _last.get("content", _last.get("text", ""))
+        )
+        if isinstance(_content, list):
+            # multimodal parts: dicts with type/text (or image_url), or plain strings
+            parts: list[str] = []
+            for p in _content:
+                if isinstance(p, dict):
+                    parts.append(str(p.get("text") or p.get("content") or ""))
+                else:
+                    parts.append(str(p))
+            _message = " ".join(parts)
+        else:
+            _message = str(_content)
+    if any(kw in _message for kw in ("画个图", "画图", "图解", "看图讲", "图说明", "eli5", "ELI5")):
+        logger.info("router_node: visual-request short-circuit → picture-explain")
+        return {
+            "selected_skill": "picture-explain",
+            "skill_layer": "atom",
+            "skill_params": {},
+        }
+
+    # 2. Emotion short-circuit
     if frustration > 0.7 or confusion > 0.8:
         logger.info(
             "router_node: emotion short-circuit (frustration=%.2f confusion=%.2f) → emotion-respond",
@@ -173,27 +209,7 @@ async def router_node(state: TutorState) -> dict[str, Any]:
             "skill_params": {},
         }
 
-    # 1.5 Deterministic picture-explain short-circuit: an explicit visual request
-    # (画个图/图解/看图讲) routes straight to picture-explain instead of gambling
-    # on the LLM selector picking it from a text-only description.
-    _message = ""
-    _msgs = state.get("messages") or []
-    if _msgs:
-        _last = _msgs[-1]
-        _content = getattr(_last, "content", _last) if not isinstance(_last, dict) else _last.get("content", "")
-        if isinstance(_content, list):
-            _message = " ".join(str(p) for p in _content)
-        else:
-            _message = str(_content)
-    if any(kw in _message for kw in ("画个图", "画图", "图解", "看图讲", "图说明", "eli5", "ELI5")):
-        logger.info("router_node: visual-request short-circuit → picture-explain")
-        return {
-            "selected_skill": "picture-explain",
-            "skill_layer": "atom",
-            "skill_params": {},
-        }
-
-    # 2. LLM-driven routing via skill-selector
+    # 3. LLM-driven routing via skill-selector
     try:
         selector = _get_skill("skill-selector")
         if selector is not None:
