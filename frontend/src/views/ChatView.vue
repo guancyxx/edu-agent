@@ -100,8 +100,37 @@ let ws: WebSocket | null = null
 
 // ── Markdown rendering (minimal, safe) ──────────────────────
 
+// Extract self-contained <svg>...</svg> blocks before escaping, so diagrams render raw.
+// Security: only pure-shape SVG allowed — strips <script>, on* handlers, and any
+// external reference (href/src/url() pointing outside the doc, data: included).
+const SVG_OPEN_RE = /<svg\b[^>]*>/
+const SVG_TAG_RE = /<\/?svg\b[^>]*>/gi
+
+function extractSvgs(text: string): { text: string, svgs: string[] } {
+  const svgs: string[] = []
+  let out = ''
+  let rest = text
+  while (true) {
+    const open = rest.match(SVG_OPEN_RE)
+    if (!open || open.index === undefined) { out += rest; break }
+    const start = open.index
+    const close = rest.indexOf('</svg>', start)
+    if (close === -1) { out += rest; break }
+    let svg = rest.slice(start, close + 6)
+    // security scrub: strip event handlers, script, and external refs
+    if (/<script[\s>]/i.test(svg) || /\son\w+\s*=/i.test(svg) || /(href|src)\s*=\s*["']?\s*(https?:|data:)/i.test(svg)) {
+      svg = '' // tainted block: drop entirely
+    }
+    out += rest.slice(0, start) + `\x00SVG${svgs.length}\x00`
+    svgs.push(svg)
+    rest = rest.slice(close + 6)
+  }
+  return { text: out, svgs }
+}
+
 function renderMarkdown(text: string): string {
-  return text
+  const { text: escaped, svgs } = extractSvgs(text)
+  let html = escaped
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
@@ -110,6 +139,10 @@ function renderMarkdown(text: string): string {
     .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
     .replace(/`(.+?)`/g, '<code>$1</code>')
     .replace(/\n/g, '<br>')
+  svgs.forEach((svg, i) => {
+    html = html.replace(`\x00SVG${i}\x00`, () => svg)
+  })
+  return html
 }
 
 // ── WebSocket ───────────────────────────────────────────────
@@ -456,6 +489,18 @@ onUnmounted(() => {
   padding: 8px;
   text-align: center;
   color: #e8d5ff;
+}
+/* Picture-explain panels: responsive inline SVG diagrams */
+.message-content :deep(svg) {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  margin: 10px auto 4px;
+  background: rgba(255,255,255,0.92);
+  border-radius: 8px;
+}
+.message-content :deep(svg text) {
+  user-select: none;
 }
 
 /* Typing indicator */

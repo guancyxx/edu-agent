@@ -173,6 +173,26 @@ async def router_node(state: TutorState) -> dict[str, Any]:
             "skill_params": {},
         }
 
+    # 1.5 Deterministic picture-explain short-circuit: an explicit visual request
+    # (画个图/图解/看图讲) routes straight to picture-explain instead of gambling
+    # on the LLM selector picking it from a text-only description.
+    _message = ""
+    _msgs = state.get("messages") or []
+    if _msgs:
+        _last = _msgs[-1]
+        _content = getattr(_last, "content", _last) if not isinstance(_last, dict) else _last.get("content", "")
+        if isinstance(_content, list):
+            _message = " ".join(str(p) for p in _content)
+        else:
+            _message = str(_content)
+    if any(kw in _message for kw in ("画个图", "画图", "图解", "看图讲", "图说明", "eli5", "ELI5")):
+        logger.info("router_node: visual-request short-circuit → picture-explain")
+        return {
+            "selected_skill": "picture-explain",
+            "skill_layer": "atom",
+            "skill_params": {},
+        }
+
     # 2. LLM-driven routing via skill-selector
     try:
         selector = _get_skill("skill-selector")
