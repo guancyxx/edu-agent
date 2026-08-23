@@ -7,9 +7,10 @@ from __future__ import annotations
 import json
 import logging
 import uuid
+from datetime import datetime
 from typing import Any, Optional
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Depends, Query
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Depends, HTTPException, Query
 from langchain_core.messages import HumanMessage
 from pydantic import BaseModel
 from sqlalchemy import select
@@ -17,7 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db, async_session
 from app.engine.graph import build_tutor_graph
-from app.models import User, TeachingEventDB
+from app.models import User, TeachingEventDB, ChatSessionDB
 from app.profile.store import profile_store
 from app.skills.loader import SkillLoader
 from app.skills.catalog import SkillCatalog
@@ -109,6 +110,180 @@ class ChatResponse(BaseModel):
     skill_used: str
     comprehension: str
     iteration_count: int
+
+
+class SessionCreate(BaseModel):
+    subject: str = "math"
+    title: Optional[str] = None
+
+
+class SessionOut(BaseModel):
+    id: str
+    title: Optional[str]
+    subject: str
+    message_count: int
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class SessionTouch(BaseModel):
+    message: str = ""
+
+
+# ── Session REST endpoints ─────────────────────────────────────────
+
+def _session_out(s: ChatSessionDB) -> SessionOut:
+    return SessionOut(
+        id=str(s.id),
+        title=s.title,
+        subject=s.subject,
+        message_count=s.message_count or 0,
+        created_at=s.created_at,
+        updated_at=s.updated_at,
+    )
+
+
+@router.get("/sessions", response_model=list[SessionOut])
+async def list_sessions(
+    user: User = Depends(
+        __import__("app.routers.auth", fromlist=["get_current_user"]).get_current_user
+    ),
+    db: AsyncSession = Depends(get_db),
+):
+    """List chat sessions for the current user, newest first."""
+    result = await db.execute(
+        select(ChatSessionDB)
+        .where(ChatSessionDB.user_id == user.id)
+        .order_by(ChatSessionDB.updated_at.desc())
+    )
+    return [_session_out(s) for s in result.scalars().all()]
+
+
+@router.post("/sessions", response_model=SessionOut, status_code=201)
+async def create_session(
+    req: SessionCreate,
+    user: User = Depends(
+        __import__("app.routers.auth", fromlist=["get_current_user"]).get_current_user
+    ),
+    db: AsyncSession = Depends(get_db),
+):
+    s = ChatSessionDB(user_id=user.id, subject=req.subject, title=req.title)
+    db.add(s)
+    await db.commit()
+    await db.refresh(s)
+    return _session_out(s)
+
+
+@router.delete("/sessions/{session_id}", status_code=204)
+async def delete_session(
+    session_id: str,
+    user: User = Depends(
+        __import__("app.routers.auth", fromlist=["get_current_user"]).get_current_user
+    ),
+    db: AsyncSession = Depends(get_db),
+):
+    import uuid as _uuid
+    try:
+        sid = _uuid.UUID(session_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid session id")
+    result = await db.execute(
+        select(ChatSessionDB).where(
+            ChatSessionDB.id == sid, ChatSessionDB.user_id == user.id
+        )
+    )
+    s = result.scalar_one_or_none()
+    if not s:
+        raise HTTPException(status_code=404, detail="Session not found")
+    await db.delete(s)
+    await db.commit()
+
+
+@router.post("/sessions/{session_id}/touch", response_model=SessionOut)
+async def touch_session(
+    session_id: str,
+    req: SessionTouch,
+    user: User = Depends(
+        __import__("app.routers.auth", fromlist=["get_current_user"]).get_current_user
+    ),
+    db: AsyncSession = Depends(get_db),
+):
+    """After a user message: bump counter and auto-title from first message."""
+    import uuid as _uuid
+    try:
+        sid = _uuid.UUID(session_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid session id")
+    result = await db.execute(
+        select(ChatSessionDB).where(
+            ChatSessionDB.id == sid, ChatSessionDB.user_id == user.id
+        )
+    )
+    s = result.scalar_one_or_none()
+    if not s:
+        raise HTTPException(status_code=404, detail="Session not found")
+    s.message_count = (s.message_count or 0) + 1
+    if not s.title and req.message:
+        s.title = req.message[:40]
+    await db.commit()
+    await db.refresh(s)
+    return _session_out(s)
+
+
+# ── Answer judging endpoint (bypasses the teaching graph) ─────────
+
+class JudgeRequest(BaseModel):
+    question: str
+    answer: str
+    subject: str = "math"
+
+
+class JudgeResponse(BaseModel):
+    correct: bool
+    feedback: str
+    correct_answer: Optional[str] = None
+
+
+@router.post("/judge", response_model=JudgeResponse)
+async def judge_answer(
+    req: JudgeRequest,
+    user: User = Depends(
+        __import__("app.routers.auth", fromlist=["get_current_user"]).get_current_user
+    ),
+):
+    """Judge a student's answer to a practice question.
+
+    Calls the text LLM directly with a strict JSON contract — deliberately
+    outside the LangGraph teaching loop so the answer board gets a verdict
+    instead of a tutoring response (hints, guided solve, etc.).
+    """
+    from app.engine.llm import get_llm
+
+    llm = get_llm()
+    prompt = (
+        "你是一个答题判定器。判断学生的作答是否正确。只输出一个 JSON 对象，"
+        '格式：{"correct": true/false, "feedback": "一句话点评(不超过50字)", '
+        '"correct_answer": "正确答案(简短)"}，不要输出其他任何内容。\n\n'
+        f"题目：{req.question}\n学生的作答：{req.answer}"
+    )
+    try:
+        resp = await llm.ainvoke(prompt)
+        text = resp.content if isinstance(resp.content, str) else str(resp.content)
+        import re as _re
+        m = _re.search(r"\{[\s\S]*\}", text)
+        if m:
+            data = json.loads(m.group(0))
+            return JudgeResponse(
+                correct=bool(data.get("correct")),
+                feedback=str(data.get("feedback", ""))[:200],
+                correct_answer=str(data["correct_answer"])[:200] if data.get("correct_answer") else None,
+            )
+    except Exception:
+        logger.exception("judge_answer LLM call failed")
+
+    raise HTTPException(status_code=502, detail="Judge unavailable, try again")
 
 
 # ── HTTP Endpoint (requires auth) ──────────────────────────────────

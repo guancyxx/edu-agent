@@ -1,77 +1,112 @@
 <template>
-  <div class="chat-view">
-    <!-- Header -->
-    <header class="chat-header">
-      <div class="header-left">
+  <div class="chat-workspace">
+    <!-- Top bar -->
+    <header class="top-bar">
+      <div class="top-left">
         <span class="logo">📚</span>
         <span class="title">EduAgent</span>
         <span class="badge" v-if="connected">● 在线</span>
         <span class="badge offline" v-else>○ 连接中</span>
       </div>
-      <div class="header-right">
+      <div class="top-right">
         <select v-model="subject" class="subject-select">
           <option value="math">数学</option>
           <option value="english">英语</option>
           <option value="chinese">语文</option>
           <option value="physics">物理</option>
         </select>
-        <span class="user-name" v-if="auth.user">{{ auth.user.display_name || auth.user.username }}</span>
+        <ThemeToggle />
         <button class="mistakes-btn" @click="$router.push('/mistakes')">📒 错题本</button>
+        <span class="user-name" v-if="auth.user">{{ auth.user.display_name || auth.user.username }}</span>
         <button class="logout-btn" @click="handleLogout">退出</button>
       </div>
     </header>
 
-    <!-- Messages -->
-    <div class="messages" ref="messagesContainer">
-      <div
-        v-for="(msg, i) in messages"
-        :key="i"
-        class="message"
-        :class="msg.role"
-      >
-        <div class="message-avatar">
-          {{ msg.role === 'user' ? '🧑' : '🤖' }}
+    <!-- ── Three horizontal collapsible segments ── -->
+    <div class="content-grid" :style="{ gridTemplateColumns: gridCols }">
+      <!-- Segment 1: session list -->
+      <div class="panel-wrapper" :class="{ collapsed: collapsed.sessions }">
+        <div class="panel-header" v-show="!collapsed.sessions">
+          <span class="panel-title">对话列表</span>
+          <button class="panel-toggle-btn" title="折叠" @click="collapsed.sessions = true">◀</button>
         </div>
-        <div class="message-body">
-          <div class="message-skill" v-if="msg.skill">
-            <span class="skill-tag">{{ msg.skill }}</span>
-          </div>
-          <div class="message-content" v-html="renderMarkdown(msg.content)"></div>
+        <div class="panel-strip" v-show="collapsed.sessions">
+          <button class="panel-toggle-btn" title="展开" @click="collapsed.sessions = false">▶</button>
+          <span class="panel-title-v">对话列表</span>
+        </div>
+        <div class="panel-body" v-show="!collapsed.sessions">
+          <SessionsPanel />
         </div>
       </div>
 
-      <!-- Typing indicator -->
-      <div class="message assistant" v-if="loading">
-        <div class="message-avatar">🤖</div>
-        <div class="message-body">
-          <div class="typing">
-            <span></span><span></span><span></span>
+      <!-- Segment 2: chat window -->
+      <div class="panel-wrapper" :class="{ collapsed: collapsed.chat }">
+        <div class="panel-header" v-show="!collapsed.chat">
+          <span class="panel-title">AI 对话</span>
+          <button class="panel-toggle-btn" title="折叠" @click="collapsed.chat = true">◀</button>
+        </div>
+        <div class="panel-strip" v-show="collapsed.chat">
+          <button class="panel-toggle-btn" title="展开" @click="collapsed.chat = false">▶</button>
+          <span class="panel-title-v">AI 对话</span>
+        </div>
+        <div class="panel-body" v-show="!collapsed.chat">
+          <div class="messages" ref="messagesContainer">
+            <div v-for="(msg, i) in messages" :key="i" class="message" :class="msg.role">
+              <div class="message-avatar">{{ msg.role === 'user' ? '🧑' : '🤖' }}</div>
+              <div class="message-body">
+                <div class="message-skill" v-if="msg.skill">
+                  <span class="skill-tag">{{ msg.skill }}</span>
+                </div>
+                <div class="message-content" v-html="renderMarkdown(msg.content)"></div>
+              </div>
+            </div>
+            <div class="message assistant" v-if="loading">
+              <div class="message-avatar">🤖</div>
+              <div class="message-body">
+                <div class="typing"><span></span><span></span><span></span></div>
+              </div>
+            </div>
+          </div>
+          <div class="input-area">
+            <textarea
+              v-model="input"
+              @keydown.enter.exact.prevent="send"
+              placeholder="输入你的问题...（可粘贴或描述题目）"
+              rows="1"
+              ref="inputRef"
+              @input="autoResize"
+            ></textarea>
+            <button @click="send" :disabled="!input.trim() || loading" class="send-btn">发送</button>
           </div>
         </div>
       </div>
-    </div>
 
-    <!-- Input -->
-    <div class="input-area">
-      <textarea
-        v-model="input"
-        @keydown.enter.exact.prevent="send"
-        placeholder="输入你的问题..."
-        rows="1"
-        ref="inputRef"
-        @input="autoResize"
-      ></textarea>
-      <button @click="send" :disabled="!input.trim() || loading" class="send-btn">
-        发送
-      </button>
+      <!-- Segment 3: answer board -->
+      <div class="panel-wrapper" :class="{ collapsed: collapsed.board }">
+        <div class="panel-header" v-show="!collapsed.board">
+          <span class="panel-title">答题板</span>
+          <button class="panel-toggle-btn" title="折叠" @click="collapsed.board = true">◀</button>
+        </div>
+        <div class="panel-strip" v-show="collapsed.board">
+          <button class="panel-toggle-btn" title="展开" @click="collapsed.board = false">▶</button>
+          <span class="panel-title-v">答题板</span>
+        </div>
+        <div class="panel-body" v-show="!collapsed.board">
+          <AnswerBoard ref="answerBoardRef" @ask-agent="handleAskFromBoard" @import-from-chat="importQuestionFromChat" />
+        </div>
+      </div>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, nextTick, onMounted, onUnmounted } from 'vue'
+import { ref, reactive, computed, nextTick, onMounted, onUnmounted, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useAuthStore } from '../stores/auth'
+import { useSessionsStore } from '../stores/sessions'
+import ThemeToggle from '../components/ThemeToggle.vue'
+import SessionsPanel from '../components/SessionsPanel.vue'
+import AnswerBoard from '../components/AnswerBoard.vue'
 
 interface Message {
   role: 'user' | 'assistant'
@@ -81,6 +116,7 @@ interface Message {
 
 const router = useRouter()
 const auth = useAuthStore()
+const sessionsStore = useSessionsStore()
 
 const messages = ref<Message[]>([
   {
@@ -95,15 +131,22 @@ const connected = ref(false)
 const subject = ref('math')
 const messagesContainer = ref<HTMLElement>()
 const inputRef = ref<HTMLElement>()
+const answerBoardRef = ref<InstanceType<typeof AnswerBoard>>()
 
-let ws: WebSocket | null = null
+// Keep the global subject for the sessions panel's new-session button
+;(window as any).__eduCurrentSubject = subject.value
+watch(subject, (v) => { (window as any).__eduCurrentSubject = v })
 
-// ── Markdown rendering (minimal, safe) ──────────────────────
+// ── Collapsible layout state ──
+const collapsed = reactive({ sessions: false, chat: false, board: false })
 
-// Extract self-contained <svg>...</svg> blocks before escaping, so diagrams render raw.
-// Security: only pure-shape SVG allowed — any block containing <script>, on* handlers,
-// script-scheme / external / data: URLs, animate-based attribute mutation, or CSS url()
-// loaders is dropped entirely (fail-closed). See AUDIT note in PR #3.
+const gridCols = computed(() => {
+  const w = (key: keyof typeof collapsed) => (collapsed[key] ? '40px' : '1fr')
+  return `minmax(200px, 240px) ${w('chat')} ${w('board')}`
+})
+
+// ── Markdown rendering (safe SVG whitelist) — unchanged from previous version ──
+
 const SVG_OPEN_RE = /<svg\b[^>]*>/
 
 function extractSvgs(text: string): { text: string, svgs: string[] } {
@@ -117,8 +160,6 @@ function extractSvgs(text: string): { text: string, svgs: string[] } {
     const close = rest.indexOf('</svg>', start)
     if (close === -1) { out += rest; break }
     let svg = rest.slice(start, close + 6)
-    // security scrub (fail-closed): test the raw block AND its entity-decoded form —
-    // the browser decodes &#106; etc. at parse time, so &#106;avascript: must be caught.
     const probe = svg + '\n' + decodeEntities(svg)
     if (
       /<script[\s>]/i.test(probe) ||
@@ -126,10 +167,9 @@ function extractSvgs(text: string): { text: string, svgs: string[] } {
       /(href|src)\s*=\s*["']?\s*(https?:|data:|javascript:|vbscript:)/i.test(probe) ||
       /to\s*=\s*["']?\s*(?:javascript|vbscript):/i.test(probe) ||
       /attributeName\s*=\s*["']?\s*(on\w+|href|xlink:href)/i.test(probe) ||
-      // CSS/attribute url() loaders — url(#fragment) refs to in-svg defs are allowed
       /url\(\s*(?!#)/i.test(probe)
     ) {
-      svg = '' // tainted block: drop entirely
+      svg = ''
     }
     out += rest.slice(0, start) + `\x00SVG${svgs.length}\x00`
     svgs.push(svg)
@@ -138,7 +178,6 @@ function extractSvgs(text: string): { text: string, svgs: string[] } {
   return { text: out, svgs }
 }
 
-/** Decode HTML numeric + named entities once (mirrors browser parse-time decoding). */
 function decodeEntities(s: string): string {
   return s
     .replace(/&#x([0-9a-f]+);/gi, (_, h: string) => safeCodePoint(parseInt(h, 16)))
@@ -171,7 +210,27 @@ function renderMarkdown(text: string): string {
   return html
 }
 
-// ── WebSocket ───────────────────────────────────────────────
+// ── Answer board integration ──
+
+function handleAskFromBoard(payload: { message: string }) {
+  input.value = payload.message
+  send()
+}
+
+function importQuestionFromChat() {
+  // Grab the latest recognized/typed question text from the conversation:
+  // prefer the last user message; fall back to vision-extracted block.
+  const lastUser = [...messages.value].reverse().find((m) => m.role === 'user')
+  if (!lastUser) return
+  let q = lastUser.content
+  const vision = q.match(/\[图片识别出的题目\]\n?([\s\S]*)/)
+  if (vision) q = vision[1].trim()
+  answerBoardRef.value?.setQuestion(q)
+}
+
+// ── WebSocket ──
+
+let ws: WebSocket | null = null
 
 function connect() {
   const token = auth.token
@@ -190,7 +249,6 @@ function connect() {
 
   ws.onclose = () => {
     connected.value = false
-    // Reconnect only if still authenticated
     if (auth.isAuthenticated) {
       setTimeout(connect, 3000)
     }
@@ -262,7 +320,7 @@ function handleLogout() {
   router.push('/login')
 }
 
-// ── Send ────────────────────────────────────────────────────
+// ── Send ──
 
 function send() {
   const text = input.value.trim()
@@ -272,16 +330,24 @@ function send() {
   input.value = ''
   loading.value = true
 
-  // Reserve a placeholder for the streaming response
   messages.value.push({ role: 'assistant', content: '' })
+
+  // Ensure we have a session to attribute this message to
+  if (!sessionsStore.currentSessionId) {
+    sessionsStore.createSession(subject.value).then(() => {
+      sessionsStore.touchSession(sessionsStore.currentSessionId, text)
+    })
+  } else {
+    sessionsStore.touchSession(sessionsStore.currentSessionId, text)
+  }
 
   if (ws && ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify({
       message: text,
       subject: subject.value,
+      session_id: sessionsStore.currentSessionId || undefined,
     }))
   } else {
-    // Fallback to HTTP with auth
     fetch('http://localhost:8000/api/chat/send', {
       method: 'POST',
       headers: {
@@ -315,7 +381,7 @@ function send() {
   scrollToBottom()
 }
 
-// ── Utilities ───────────────────────────────────────────────
+// ── Utilities ──
 
 function autoResize() {
   const el = inputRef.value as HTMLTextAreaElement
@@ -335,6 +401,7 @@ function scrollToBottom() {
 
 onMounted(() => {
   connect()
+  sessionsStore.loadSessions()
 })
 
 onUnmounted(() => {
@@ -343,33 +410,25 @@ onUnmounted(() => {
 </script>
 
 <style scoped>
-.chat-view {
+.chat-workspace {
   display: flex;
   flex-direction: column;
   height: 100vh;
-  max-width: 720px;
-  margin: 0 auto;
-  background: var(--bg-secondary);
+  background: var(--bg-primary);
 }
 
-/* Header */
-.chat-header {
+.top-bar {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 12px 16px;
+  padding: 10px 16px;
   background: var(--bg-tertiary);
   border-bottom: 1px solid var(--border);
   flex-shrink: 0;
 }
 
-.header-left {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.header-right {
+.top-left,
+.top-right {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -411,8 +470,8 @@ onUnmounted(() => {
   border-color: #ff6b6b;
 }
 
-.logo { font-size: 24px; }
-.title { font-weight: 700; font-size: 18px; }
+.logo { font-size: 22px; }
+.title { font-weight: 700; font-size: 17px; }
 
 .badge {
   font-size: 11px;
@@ -431,7 +490,7 @@ onUnmounted(() => {
   cursor: pointer;
 }
 
-/* Messages */
+/* Messages (inside middle panel-body) */
 .messages {
   flex: 1;
   overflow-y: auto;
@@ -453,10 +512,10 @@ onUnmounted(() => {
 }
 
 .message-avatar {
-  font-size: 28px;
+  font-size: 24px;
   flex-shrink: 0;
-  width: 40px;
-  height: 40px;
+  width: 36px;
+  height: 36px;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -474,11 +533,6 @@ onUnmounted(() => {
   align-items: flex-end;
 }
 
-.message-skill {
-  display: flex;
-  gap: 4px;
-}
-
 .skill-tag {
   font-size: 11px;
   padding: 2px 8px;
@@ -489,7 +543,7 @@ onUnmounted(() => {
 
 .message-content {
   padding: 12px 16px;
-  border-radius: var(--radius);
+  border-radius: 12px;
   font-size: 15px;
   line-height: 1.6;
 }
@@ -500,82 +554,53 @@ onUnmounted(() => {
 }
 
 .message.assistant .message-content {
-  background: var(--bg-tertiary);
+  background: var(--bg-secondary);
 }
 
-.message-content :deep(strong) { font-weight: 600; }
-.message-content :deep(code) {
-  background: rgba(255,255,255,0.1);
-  padding: 2px 6px;
-  border-radius: 4px;
-  font-size: 13px;
-}
-.message-content :deep(.math-block) {
-  margin: 8px 0;
-  padding: 8px;
-  text-align: center;
-  color: #e8d5ff;
-}
-/* Picture-explain panels: responsive inline SVG diagrams */
-.message-content :deep(svg) {
-  display: block;
-  max-width: 100%;
-  height: auto;
-  margin: 10px auto 4px;
-  background: rgba(255,255,255,0.92);
-  border-radius: 8px;
-}
-.message-content :deep(svg text) {
-  user-select: none;
-}
-
-/* Typing indicator */
 .typing {
   display: flex;
   gap: 4px;
   padding: 12px 16px;
-  background: var(--bg-tertiary);
-  border-radius: var(--radius);
+  background: var(--bg-secondary);
+  border-radius: 12px;
 }
 
 .typing span {
-  width: 8px;
-  height: 8px;
+  width: 7px;
+  height: 7px;
   border-radius: 50%;
   background: var(--text-secondary);
-  animation: bounce 1.4s infinite;
+  animation: typing-blink 1.2s infinite;
 }
 
 .typing span:nth-child(2) { animation-delay: 0.2s; }
 .typing span:nth-child(3) { animation-delay: 0.4s; }
 
-@keyframes bounce {
-  0%, 60%, 100% { transform: translateY(0); }
-  30% { transform: translateY(-8px); }
+@keyframes typing-blink {
+  0%, 60%, 100% { opacity: 0.3; }
+  30% { opacity: 1; }
 }
 
 /* Input */
 .input-area {
   display: flex;
   gap: 8px;
-  padding: 12px 16px;
-  background: var(--bg-tertiary);
+  padding: 12px;
   border-top: 1px solid var(--border);
   flex-shrink: 0;
 }
 
 .input-area textarea {
   flex: 1;
-  background: var(--bg-primary);
+  background: var(--bg-secondary);
   color: var(--text-primary);
   border: 1px solid var(--border);
-  border-radius: var(--radius);
+  border-radius: 10px;
   padding: 10px 14px;
-  font-size: 15px;
-  font-family: var(--font);
+  font-size: 14px;
+  font-family: inherit;
   resize: none;
   outline: none;
-  transition: border-color 0.2s;
 }
 
 .input-area textarea:focus {
@@ -583,23 +608,16 @@ onUnmounted(() => {
 }
 
 .send-btn {
+  padding: 0 22px;
+  border: none;
+  border-radius: 10px;
   background: var(--accent);
   color: white;
-  border: none;
-  border-radius: var(--radius);
-  padding: 0 20px;
-  font-size: 15px;
+  font-size: 14px;
   font-weight: 600;
   cursor: pointer;
-  transition: background 0.2s;
 }
 
-.send-btn:hover:not(:disabled) {
-  background: var(--accent-hover);
-}
-
-.send-btn:disabled {
-  opacity: 0.4;
-  cursor: not-allowed;
-}
+.send-btn:hover { background: var(--accent-hover); }
+.send-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 </style>
