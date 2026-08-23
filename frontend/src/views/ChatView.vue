@@ -101,10 +101,10 @@ let ws: WebSocket | null = null
 // ── Markdown rendering (minimal, safe) ──────────────────────
 
 // Extract self-contained <svg>...</svg> blocks before escaping, so diagrams render raw.
-// Security: only pure-shape SVG allowed — strips <script>, on* handlers, and any
-// external reference (href/src/url() pointing outside the doc, data: included).
+// Security: only pure-shape SVG allowed — any block containing <script>, on* handlers,
+// script-scheme / external / data: URLs, animate-based attribute mutation, or CSS url()
+// loaders is dropped entirely (fail-closed). See AUDIT note in PR #3.
 const SVG_OPEN_RE = /<svg\b[^>]*>/
-const SVG_TAG_RE = /<\/?svg\b[^>]*>/gi
 
 function extractSvgs(text: string): { text: string, svgs: string[] } {
   const svgs: string[] = []
@@ -117,8 +117,18 @@ function extractSvgs(text: string): { text: string, svgs: string[] } {
     const close = rest.indexOf('</svg>', start)
     if (close === -1) { out += rest; break }
     let svg = rest.slice(start, close + 6)
-    // security scrub: strip event handlers, script, and external refs
-    if (/<script[\s>]/i.test(svg) || /\son\w+\s*=/i.test(svg) || /(href|src)\s*=\s*["']?\s*(https?:|data:)/i.test(svg)) {
+    // security scrub (fail-closed): test the raw block AND its entity-decoded form —
+    // the browser decodes &#106; etc. at parse time, so &#106;avascript: must be caught.
+    const probe = svg + '\n' + decodeEntities(svg)
+    if (
+      /<script[\s>]/i.test(probe) ||
+      /\son\w+\s*=/i.test(probe) ||
+      /(href|src)\s*=\s*["']?\s*(https?:|data:|javascript:|vbscript:)/i.test(probe) ||
+      /to\s*=\s*["']?\s*(?:javascript|vbscript):/i.test(probe) ||
+      /attributeName\s*=\s*["']?\s*(on\w+|href|xlink:href)/i.test(probe) ||
+      // CSS/attribute url() loaders — url(#fragment) refs to in-svg defs are allowed
+      /url\(\s*(?!#)/i.test(probe)
+    ) {
       svg = '' // tainted block: drop entirely
     }
     out += rest.slice(0, start) + `\x00SVG${svgs.length}\x00`
@@ -126,6 +136,22 @@ function extractSvgs(text: string): { text: string, svgs: string[] } {
     rest = rest.slice(close + 6)
   }
   return { text: out, svgs }
+}
+
+/** Decode HTML numeric + named entities once (mirrors browser parse-time decoding). */
+function decodeEntities(s: string): string {
+  return s
+    .replace(/&#x([0-9a-f]+);/gi, (_, h: string) => safeCodePoint(parseInt(h, 16)))
+    .replace(/&#(\d+);/g, (_, d: string) => safeCodePoint(parseInt(d, 10)))
+    .replace(/&quot;/gi, '"')
+    .replace(/&apos;/gi, "'")
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/&amp;/gi, '&')
+}
+
+function safeCodePoint(cp: number): string {
+  try { return String.fromCodePoint(cp) } catch { return '' }
 }
 
 function renderMarkdown(text: string): string {
