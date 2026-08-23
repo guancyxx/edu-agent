@@ -100,8 +100,63 @@ let ws: WebSocket | null = null
 
 // ── Markdown rendering (minimal, safe) ──────────────────────
 
+// Extract self-contained <svg>...</svg> blocks before escaping, so diagrams render raw.
+// Security: only pure-shape SVG allowed — any block containing <script>, on* handlers,
+// script-scheme / external / data: URLs, animate-based attribute mutation, or CSS url()
+// loaders is dropped entirely (fail-closed). See AUDIT note in PR #3.
+const SVG_OPEN_RE = /<svg\b[^>]*>/
+
+function extractSvgs(text: string): { text: string, svgs: string[] } {
+  const svgs: string[] = []
+  let out = ''
+  let rest = text
+  while (true) {
+    const open = rest.match(SVG_OPEN_RE)
+    if (!open || open.index === undefined) { out += rest; break }
+    const start = open.index
+    const close = rest.indexOf('</svg>', start)
+    if (close === -1) { out += rest; break }
+    let svg = rest.slice(start, close + 6)
+    // security scrub (fail-closed): test the raw block AND its entity-decoded form —
+    // the browser decodes &#106; etc. at parse time, so &#106;avascript: must be caught.
+    const probe = svg + '\n' + decodeEntities(svg)
+    if (
+      /<script[\s>]/i.test(probe) ||
+      /\son\w+\s*=/i.test(probe) ||
+      /(href|src)\s*=\s*["']?\s*(https?:|data:|javascript:|vbscript:)/i.test(probe) ||
+      /to\s*=\s*["']?\s*(?:javascript|vbscript):/i.test(probe) ||
+      /attributeName\s*=\s*["']?\s*(on\w+|href|xlink:href)/i.test(probe) ||
+      // CSS/attribute url() loaders — url(#fragment) refs to in-svg defs are allowed
+      /url\(\s*(?!#)/i.test(probe)
+    ) {
+      svg = '' // tainted block: drop entirely
+    }
+    out += rest.slice(0, start) + `\x00SVG${svgs.length}\x00`
+    svgs.push(svg)
+    rest = rest.slice(close + 6)
+  }
+  return { text: out, svgs }
+}
+
+/** Decode HTML numeric + named entities once (mirrors browser parse-time decoding). */
+function decodeEntities(s: string): string {
+  return s
+    .replace(/&#x([0-9a-f]+);/gi, (_, h: string) => safeCodePoint(parseInt(h, 16)))
+    .replace(/&#(\d+);/g, (_, d: string) => safeCodePoint(parseInt(d, 10)))
+    .replace(/&quot;/gi, '"')
+    .replace(/&apos;/gi, "'")
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/&amp;/gi, '&')
+}
+
+function safeCodePoint(cp: number): string {
+  try { return String.fromCodePoint(cp) } catch { return '' }
+}
+
 function renderMarkdown(text: string): string {
-  return text
+  const { text: escaped, svgs } = extractSvgs(text)
+  let html = escaped
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
@@ -110,6 +165,10 @@ function renderMarkdown(text: string): string {
     .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
     .replace(/`(.+?)`/g, '<code>$1</code>')
     .replace(/\n/g, '<br>')
+  svgs.forEach((svg, i) => {
+    html = html.replace(`\x00SVG${i}\x00`, () => svg)
+  })
+  return html
 }
 
 // ── WebSocket ───────────────────────────────────────────────
@@ -456,6 +515,18 @@ onUnmounted(() => {
   padding: 8px;
   text-align: center;
   color: #e8d5ff;
+}
+/* Picture-explain panels: responsive inline SVG diagrams */
+.message-content :deep(svg) {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  margin: 10px auto 4px;
+  background: rgba(255,255,255,0.92);
+  border-radius: 8px;
+}
+.message-content :deep(svg text) {
+  user-select: none;
 }
 
 /* Typing indicator */
