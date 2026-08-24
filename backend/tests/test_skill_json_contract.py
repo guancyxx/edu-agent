@@ -141,6 +141,31 @@ async def test_confused_chain_executes_exactly_three_times(monkeypatch):
         }
 
     monkeypatch.setattr(nodes, "_llm_json", fake_llm_json)
+
+    # Real execute_node, LLM mocked at the seam get_llm exposes: the fake
+    # model replies with the A4 JSON contract (always confused), so the
+    # full assess→router→execute→observe chain runs end-to-end with only
+    # the model layer faked.
+    from app.engine import llm as llm_mod
+
+    class FakeMessage:
+        def __init__(self, content):
+            self.content = content
+
+    class FakeLLM:
+        async def ainvoke(self, messages):
+            payload = json.dumps(
+                {
+                    "output": "再讲一遍，换个角度。",
+                    "comprehension": "confused",
+                    "knowledge_delta": {"7-1-3": 0.3},
+                },
+                ensure_ascii=False,
+            )
+            return FakeMessage(f"```json\n{payload}\n```")
+
+    monkeypatch.setattr(llm_mod, "get_llm", lambda: FakeLLM())
+
     state = {
         "messages": [HumanMessage(content="听不懂")],
         "emotion_state": {},
@@ -152,13 +177,16 @@ async def test_confused_chain_executes_exactly_three_times(monkeypatch):
     executes = 0
     for _ in range(10):
         state.update(await nodes.router_node(state))
-        executes += 1  # execute runs right after router
-        state["comprehension_signal"] = "confused"
+        result = await nodes.execute_node(state)
+        state.update(result)
+        executes += 1
+        assert state["comprehension_signal"] == "confused"
         state.update(await nodes.observe_node(state))
         if not state["should_continue"]:
             break
     assert executes == 3
     assert state["iteration_count"] == 3
+    assert state["knowledge_delta"] == {"7-1-3": 0.3}
 
 
 async def test_emotion_branch_also_bumps():
