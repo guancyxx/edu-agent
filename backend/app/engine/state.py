@@ -47,6 +47,13 @@ class TutorState(TypedDict):
         Preferred pedagogical entry point.
     recent_mistakes:
         Sliding window of the student's most recent errors (max ~10).
+    curriculum_kps:
+        Knowledge points of the student's subject+grade, injected by
+        ``assess_node`` from the curriculum tree (id/title/difficulty/
+        description/prerequisites dicts).
+    weak_kps:
+        Subset worth teaching next: mastery < 0.6 with prerequisites
+        satisfied. Computed deterministically in ``assess_node`` (no LLM).
     selected_skill:
         The skill id chosen by ``router_node`` for the current turn.
     skill_params:
@@ -58,7 +65,8 @@ class TutorState(TypedDict):
     comprehension_signal:
         How well the student understood the last skill output.
     knowledge_delta:
-        Mastery changes computed this run, keyed by knowledge-point id.
+        Mastery levels computed this run, keyed by curriculum KP id;
+        ``update_node`` drops keys that are not valid curriculum ids.
     should_continue:
         Whether the graph should loop back to ``router`` after ``observe``.
     iteration_count:
@@ -80,6 +88,8 @@ class TutorState(TypedDict):
     ability_level: Literal["beginner", "intermediate", "advanced"]
     learning_style: Literal["example_first", "theory_first", "practice_first"]
     recent_mistakes: list[dict]
+    curriculum_kps: list[dict]
+    weak_kps: list[dict]
 
     # --- routing / execution ---
     selected_skill: str

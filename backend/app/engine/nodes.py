@@ -121,6 +121,62 @@ async def assess_node(state: TutorState) -> dict[str, Any]:
             if val is not None:
                 update[key] = val
 
+    # 1.5 Curriculum anchoring: load the grade's knowledge tree and compute
+    # weak knowledge points (pure deterministic code, no LLM).
+    subject = str(state.get("subject", "math"))
+    grade = update.get("grade") or state.get("grade") or 7
+    try:
+        from app.curriculum import get_index
+
+        index = get_index()
+        chapters = index.list_by_grade(subject, int(grade))
+        kps = [kp for ch in chapters for kp in ch.knowledge_points]
+        if kps:
+            kp_ids = {kp.id for kp in kps}
+            update["curriculum_kps"] = [
+                {
+                    "id": kp.id,
+                    "title": kp.title,
+                    "difficulty": kp.difficulty,
+                    "description": kp.description,
+                    "prerequisites": kp.prerequisites,
+                }
+                for kp in kps
+            ]
+            mastery = update.get(
+                "knowledge_mastery", state.get("knowledge_mastery", {})
+            ) or {}
+
+            def _prereqs_ok(kp) -> bool:
+                # Prerequisites outside the loaded tree belong to earlier
+                # grades — assume covered unless mastery says otherwise.
+                return all(
+                    mastery.get(p, 0.0) >= 0.6
+                    for p in kp.prerequisites
+                    if p in kp_ids
+                )
+
+            weak = [
+                kp for kp in kps
+                if mastery.get(kp.id, 0.0) < 0.6 and _prereqs_ok(kp)
+            ]
+            weak.sort(key=lambda kp: (mastery.get(kp.id, 0.0), kp.difficulty))
+            update["weak_kps"] = [
+                {
+                    "id": kp.id,
+                    "title": kp.title,
+                    "difficulty": kp.difficulty,
+                    "description": kp.description,
+                }
+                for kp in weak[:8]
+            ]
+            logger.info(
+                "assess_node: curriculum %s-%d: %d KPs, %d weak",
+                subject, int(grade), len(kps), len(weak),
+            )
+    except Exception as e:
+        logger.warning("assess_node: curriculum anchoring failed (%s)", e)
+
     # 2. Emotion analysis via LLM (merged into assess — no separate call site)
     if user_text:
         try:
@@ -236,6 +292,8 @@ async def router_node(state: TutorState) -> dict[str, Any]:
                 "ability_level": state.get("ability_level", "beginner"),
                 "emotion_state": emotion,
                 "recent_mistakes": state.get("recent_mistakes", []),
+                "curriculum_kps": state.get("curriculum_kps", []),
+                "weak_kps": state.get("weak_kps", []),
                 "available_skills": available_skills,
             })
 
@@ -251,10 +309,25 @@ async def router_node(state: TutorState) -> dict[str, Any]:
                         "router_node: LLM selected %s (layer=%s, reason=%s)",
                         selected, layer, decision.get("reason", ""),
                     )
+                    # Deterministic concept_id validation against the real
+                    # curriculum ids — never trust the LLM on this. When no
+                    # tree is loaded (empty list) keep the LLM's value: it is
+                    # advisory prompt context, not persisted data.
+                    params = dict(params) if isinstance(params, dict) else {}
+                    raw_concept = str(params.get("concept_id", "") or "").strip()
+                    valid_kp_ids = {
+                        kp["id"] for kp in state.get("curriculum_kps", [])
+                    }
+                    if raw_concept and valid_kp_ids and raw_concept not in valid_kp_ids:
+                        logger.warning(
+                            "router_node: concept_id %r not in curriculum, dropped",
+                            raw_concept,
+                        )
+                        params["concept_id"] = ""
                     return {
                         "selected_skill": selected,
                         "skill_layer": layer if layer in ("atom", "molecule", "compound") else "atom",
-                        "skill_params": params if isinstance(params, dict) else {},
+                        "skill_params": params,
                     }
                 logger.warning(
                     "router_node: LLM returned invalid skill %r, falling back", selected
@@ -393,16 +466,34 @@ async def update_node(state: TutorState) -> dict[str, Any]:
             async with async_session() as db:
                 profile = await profile_store.load(db, student_id)
 
-                # Apply knowledge deltas
+                # Apply knowledge deltas — whitelist keys against the real
+                # curriculum. Invalid keys are dropped and logged; an empty
+                # index (no tree for this subject/grade) drops everything,
+                # by design: unvalidated keys are worse than no data.
                 if delta:
+                    from app.curriculum import get_index
+
+                    index = get_index()
                     for kp_id, change in delta.items():
+                        kp = index.get_kp(str(kp_id))
+                        if kp is None:
+                            logger.warning(
+                                "update_node: dropped knowledge_delta key %r (not a curriculum id)",
+                                kp_id,
+                            )
+                            continue
                         if isinstance(change, dict):
                             score = change.get("mastery", 0)
                         elif isinstance(change, (int, float)):
                             score = float(change)
                         else:
                             continue
-                        profile.update_mastery(kp_id, score - profile.knowledge_mastery.get(kp_id, 0))
+                        score = max(0.0, min(1.0, float(score)))
+                        # Value semantics: the KP's latest mastery level.
+                        profile.knowledge_mastery[kp.id] = score
+                        logger.info(
+                            "update_node: mastery[%s] = %.2f", kp.id, score
+                        )
 
                 # Map comprehension to emotion update
                 emotion_map = {
@@ -437,6 +528,7 @@ async def update_node(state: TutorState) -> dict[str, Any]:
                             question=user_msg or "(empty message)",
                             correct_answer=skill_output or None,
                             explanation=f"Student was {comprehension}. Skill: {skill}",
+                            knowledge_point_id=(state.get("skill_params") or {}).get("concept_id") or None,
                             source="chat",
                         )
                         mistake_db.add(mistake)

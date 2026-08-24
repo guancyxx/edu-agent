@@ -37,6 +37,21 @@ You are the routing brain of a K12 tutoring system. Analyze the student's messag
 - Recent mistakes: {{ recent_mistakes }}
 {% endif %}
 
+{% if weak_kps %}
+## Student's Weak Knowledge Points (priority targets)
+{% for kp in weak_kps %}
+- `{{ kp.id }}` — {{ kp.title }} (difficulty {{ kp.difficulty }}): {{ kp.description }}
+{% endfor %}
+{% endif %}
+
+{% if curriculum_kps %}
+## Curriculum Knowledge Points (this grade)
+If the student's question maps to one of these, set concept_id to the EXACT id shown.
+{% for kp in curriculum_kps %}
+- `{{ kp.id }}` — {{ kp.title }}
+{% endfor %}
+{% endif %}
+
 ## Available Skills
 
 {% for skill in available_skills %}
@@ -75,3 +90,4 @@ Respond with ONLY a JSON object (no markdown, no text outside the JSON):
 - `skill_layer` must be "atom" or "molecule".
 - Never select a skill not in the catalog.
 - Keep `reason` under 15 words.
+- `skill_params.concept_id` MUST be an exact curriculum id from the lists above when the question maps to one; use an empty string otherwise. Never invent ids.
