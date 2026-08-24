@@ -483,12 +483,24 @@ async def update_node(state: TutorState) -> dict[str, Any]:
                             )
                             continue
                         if isinstance(change, dict):
-                            score = change.get("mastery", 0)
-                        elif isinstance(change, (int, float)):
-                            score = float(change)
+                            raw_score = change.get("mastery")
+                        elif isinstance(change, (int, float)) and not isinstance(change, bool):
+                            raw_score = change
                         else:
+                            logger.warning(
+                                "update_node: skipped knowledge_delta[%r] (unsupported type %s)",
+                                kp_id, type(change).__name__,
+                            )
                             continue
-                        score = max(0.0, min(1.0, float(score)))
+                        try:
+                            score = float(raw_score)  # type: ignore[arg-type]
+                        except (TypeError, ValueError):
+                            logger.warning(
+                                "update_node: skipped knowledge_delta[%r] (non-numeric mastery %r)",
+                                kp_id, raw_score,
+                            )
+                            continue
+                        score = max(0.0, min(1.0, score))
                         # Value semantics: the KP's latest mastery level.
                         profile.knowledge_mastery[kp.id] = score
                         logger.info(

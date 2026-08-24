@@ -204,3 +204,58 @@ async def test_assess_cold_start(monkeypatch):
             prereq not in curriculum
             for prereq in curriculum[weak["id"]]["prerequisites"]
         )
+
+
+async def test_update_skips_malformed_delta_entries(monkeypatch):
+    from app.profile.models import StudentProfile
+
+    uid = str(uuid_mod.uuid4())
+    profile = StudentProfile(user_id=uid)
+    profile.knowledge_mastery = {"7-1-3": 0.8}  # must survive malformed entry
+    fake_store = SimpleNamespace(load=AsyncMock(return_value=profile), save=AsyncMock())
+    sessions = []
+
+    class FakeSession:
+        def __init__(self):
+            self.added = []
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        def add(self, obj):
+            self.added.append(obj)
+
+        async def commit(self):
+            pass
+
+    import app.database as database
+    import app.profile.store as store
+
+    monkeypatch.setattr(database, "async_session", lambda: (sessions.append(FakeSession()) or sessions[-1]))
+    monkeypatch.setattr(store, "profile_store", fake_store)
+    state = {
+        "student_id": uid,
+        "subject": "math",
+        "grade": 7,
+        "comprehension_signal": "understood",
+        "selected_skill": "concept-explain",
+        "skill_params": {},
+        "knowledge_delta": {
+            "7-1-2": 0.5,
+            "7-1-3": {},
+            "7-1-4": {"mastery": "abc"},
+            "7-1-5": "nonsense",
+            "7-1-1": True,
+        },
+        "messages": [HumanMessage(content="懂了")],
+        "skill_output": "好",
+    }
+    out = await nodes.update_node(state)
+    assert out == {}
+    # only the valid numeric entry applied; existing 0.8 NOT erased by {}
+    assert profile.knowledge_mastery == {"7-1-3": 0.8, "7-1-2": 0.5}
+    # understood → no mistake recorded → only the profile session exists
+    assert len(sessions) == 1
