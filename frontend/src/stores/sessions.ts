@@ -22,6 +22,7 @@ export const useSessionsStore = defineStore('sessions', () => {
   const auth = useAuthStore()
   const sessions = ref<SessionMeta[]>([])
   const currentSessionId = ref<string>('')
+  const currentSubject = ref<string>('math')
   const loaded = ref(false)
 
   function authHeaders(): Record<string, string> {
@@ -114,6 +115,7 @@ export const useSessionsStore = defineStore('sessions', () => {
   return {
     sessions,
     currentSessionId,
+    currentSubject,
     loaded,
     loadSessions,
     createSession,

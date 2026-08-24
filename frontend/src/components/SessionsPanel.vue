@@ -69,8 +69,6 @@ function formatTime(iso: string) {
 
 async function newSession() {
   // subject inherited from chat panel selection (default math)
-  await sessionsStore.createSession(
-    (window as any).__eduCurrentSubject || 'math'
-  )
+  await sessionsStore.createSession(sessionsStore.currentSubject)
 }
 </script>
