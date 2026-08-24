@@ -35,3 +35,6 @@ docker/volumes/
 # DSH workbench runtime state (contains .credentials.yaml — never commit)
 dsh-workbench/.dsh-home/
 dsh-workbench/spike/
+
+# Curriculum knowledge trees are code, not runtime data
+!backend/app/curriculum/data/

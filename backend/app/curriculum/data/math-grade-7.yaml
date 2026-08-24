@@ -1,0 +1,90 @@
+subject: math
+grade: 7
+semester: 上册
+title: "七年级数学（上册）"
+chapters:
+  - id: "7-1"
+    title: "有理数"
+    knowledge_points:
+      - id: "7-1-1"
+        title: "正数和负数"
+        difficulty: 1
+        prerequisites: []
+        description: "理解正数、负数的概念，会用正负数表示相反意义的量"
+      - id: "7-1-2"
+        title: "有理数"
+        difficulty: 1
+        prerequisites: ["7-1-1"]
+        description: "理解有理数的概念，掌握有理数的分类"
+      - id: "7-1-3"
+        title: "有理数的加减法"
+        difficulty: 2
+        prerequisites: ["7-1-2"]
+        description: "掌握有理数加法、减法法则及混合运算"
+      - id: "7-1-4"
+        title: "有理数的乘除法"
+        difficulty: 2
+        prerequisites: ["7-1-3"]
+        description: "掌握有理数乘法、除法法则及混合运算"
+      - id: "7-1-5"
+        title: "有理数的乘方"
+        difficulty: 3
+        prerequisites: ["7-1-4"]
+        description: "理解乘方的概念，掌握有理数乘方运算及科学记数法"
+
+  - id: "7-2"
+    title: "整式的加减"
+    knowledge_points:
+      - id: "7-2-1"
+        title: "整式"
+        difficulty: 2
+        prerequisites: ["7-1-3"]
+        description: "理解单项式、多项式、整式的概念"
+      - id: "7-2-2"
+        title: "整式的加减"
+        difficulty: 2
+        prerequisites: ["7-2-1"]
+        description: "掌握合并同类项法则和去括号法则，进行整式加减运算"
+
+  - id: "7-3"
+    title: "一元一次方程"
+    knowledge_points:
+      - id: "7-3-1"
+        title: "从算式到方程"
+        difficulty: 2
+        prerequisites: ["7-2-2"]
+        description: "理解方程的概念，认识一元一次方程"
+      - id: "7-3-2"
+        title: "解一元一次方程（一）— 合并同类项与移项"
+        difficulty: 3
+        prerequisites: ["7-3-1"]
+        description: "掌握用合并同类项和移项解一元一次方程"
+      - id: "7-3-3"
+        title: "解一元一次方程（二）— 去括号与去分母"
+        difficulty: 3
+        prerequisites: ["7-3-2"]
+        description: "掌握去括号、去分母解一元一次方程"
+      - id: "7-3-4"
+        title: "实际问题与一元一次方程"
+        difficulty: 4
+        prerequisites: ["7-3-3"]
+        description: "能列一元一次方程解决实际问题"
+
+  - id: "7-4"
+    title: "几何图形初步"
+    knowledge_points:
+      - id: "7-4-1"
+        title: "几何图形"
+        difficulty: 1
+        prerequisites: []
+        description: "认识立体图形与平面图形，理解图形的展开图"
+      - id: "7-4-2"
+        title: "直线、射线、线段"
+        difficulty: 2
+        prerequisites: ["7-4-1"]
+        description: "理解直线、射线、线段的概念及性质"
+      - id: "7-4-3"
+        title: "角"
+        difficulty: 2
+        prerequisites: ["7-4-2"]
+        description: "理解角的概念，掌握角的度量、比较与运算"
