@@ -11,7 +11,7 @@ from datetime import datetime
 from typing import Any, Optional
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Depends, HTTPException, Query
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -293,6 +293,97 @@ async def touch_session(
     return _session_out(s)
 
 
+# ── Session history endpoint ────────────────────────────────────────
+
+class HistoryMessage(BaseModel):
+    role: str  # "user" | "assistant" | "summary" (compaction digest)
+    content: str
+
+
+def _history_from_snapshot(snapshot) -> list[HistoryMessage]:
+    """Map a LangGraph StateSnapshot to a chat-history message list.
+
+    human → user, ai → assistant, system (PR#10 compaction summary) →
+    summary; all other message types (tool calls, RemoveMessage markers)
+    are skipped — the frontend only renders conversational turns.
+    """
+    if not snapshot:
+        return []
+    out: list[HistoryMessage] = []
+    for m in (snapshot.values or {}).get("messages", []):
+        if isinstance(m, HumanMessage):
+            role = "user"
+        elif isinstance(m, AIMessage):
+            role = "assistant"
+        elif isinstance(m, SystemMessage):
+            role = "summary"
+        else:
+            continue
+        content = m.content
+        if isinstance(content, list):
+            # multimodal content blocks → concatenate their text parts.
+            # Parts arrive as dicts (e.g. {"type": "text", "text": ...})
+            # — pull "text" from dicts, .text from typed objects.
+            parts = []
+            for p in content:
+                if isinstance(p, str):
+                    parts.append(p)
+                elif isinstance(p, dict):
+                    parts.append(str(p.get("text") or ""))
+                else:
+                    parts.append(str(getattr(p, "text", "") or ""))
+            content = "".join(parts)
+        content = (content or "").strip()
+        if content:
+            out.append(HistoryMessage(role=role, content=content))
+    return out
+
+
+@router.get("/sessions/{session_id}/messages", response_model=list[HistoryMessage])
+async def get_session_messages(
+    session_id: str,
+    user: User = Depends(
+        __import__("app.routers.auth", fromlist=["get_current_user"]).get_current_user
+    ),
+    db: AsyncSession = Depends(get_db),
+):
+    """Return a session's chat history.
+
+    There is no dedicated message table by design: the Postgres
+    checkpointer (thread ``chat-{user_id}-{session_id}``, see PR#6) is
+    the single source of truth for conversation state, so history is
+    available for every session that ever exchanged a message —
+    including sessions created before this endpoint existed.
+    """
+    import uuid as _uuid
+    try:
+        sid = _uuid.UUID(session_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid session id")
+
+    result = await db.execute(
+        select(ChatSessionDB).where(
+            ChatSessionDB.id == sid, ChatSessionDB.user_id == user.id
+        )
+    )
+    if result.scalar_one_or_none() is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    thread_id = _thread_id_for(user.id, str(sid))
+    if thread_id is None:
+        # Unreachable (sid already parsed as UUID), kept as a guard.
+        raise HTTPException(status_code=400, detail="Invalid session id")
+    try:
+        snapshot = await get_graph().aget_state(
+            {"configurable": {"thread_id": thread_id}}
+        )
+    except Exception:
+        logger.exception("aget_state failed for thread=%s", thread_id)
+        raise HTTPException(status_code=503, detail="History unavailable, try again")
+
+    return _history_from_snapshot(snapshot)
+
+
 # ── Answer judging endpoint (bypasses the teaching graph) ─────────
 
 class JudgeRequest(BaseModel):
@@ -382,8 +473,21 @@ async def send_message(
         config={"configurable": {"thread_id": thread_id}},
     )
 
+    reply = result.get("skill_output", "")
+
+    # Append the assistant reply to the checkpointed history (same reason
+    # as the WS path: the graph never adds an AIMessage itself). Best-effort.
+    if reply:
+        try:
+            await get_graph().aupdate_state(
+                {"configurable": {"thread_id": thread_id}},
+                {"messages": [AIMessage(content=reply)]},
+            )
+        except Exception:
+            logger.warning("Failed to append reply to thread=%s", thread_id, exc_info=True)
+
     return ChatResponse(
-        reply=result.get("skill_output", ""),
+        reply=reply,
         skill_used=result.get("selected_skill", "unknown"),
         comprehension=result.get("comprehension_signal", "no_response"),
         iteration_count=result.get("iteration_count", 0),
@@ -531,6 +635,7 @@ async def chat_websocket(websocket: WebSocket):
                     # Log teaching event
                     event_log = TeachingEventDB(
                         user_id=str(user.id),
+                        session_id=session_id if isinstance(session_id, str) else None,
                         skill_id=final_skill or "unknown",
                         student_message=message[:2000],
                         skill_output=final_output[:5000] if final_output else None,
@@ -539,6 +644,24 @@ async def chat_websocket(websocket: WebSocket):
                     )
                     db.add(event_log)
                     await db.commit()
+
+                # Append the assistant reply to the checkpointed history.
+                # The graph stores the reply in the plain ``skill_output``
+                # state field and never adds an AIMessage to the messages
+                # channel — without this, GET /sessions/{id}/messages would
+                # show only student turns.  Best-effort: a failure must not
+                # break the chat turn.
+                if final_output:
+                    try:
+                        await get_graph().aupdate_state(
+                            {"configurable": {"thread_id": thread_id}},
+                            {"messages": [AIMessage(content=final_output)]},
+                        )
+                    except Exception:
+                        logger.warning(
+                            "Failed to append assistant reply to thread=%s",
+                            thread_id, exc_info=True,
+                        )
 
                 await websocket.send_text(json.dumps({
                     "type": "done",
