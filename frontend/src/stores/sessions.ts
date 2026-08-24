@@ -11,6 +11,11 @@ export interface SessionMeta {
   updated_at: string
 }
 
+export interface HistoryMessage {
+  role: 'user' | 'assistant' | 'summary' // summary = compaction digest (PR#10)
+  content: string
+}
+
 export const API_BASE = 'http://localhost:8000'
 
 export const useSessionsStore = defineStore('sessions', () => {
@@ -72,6 +77,21 @@ export const useSessionsStore = defineStore('sessions', () => {
     currentSessionId.value = id
   }
 
+  // Fetch a session's message history from the backend checkpointer.
+  // Returns null on any failure (offline backend etc.) so callers can
+  // keep their current view instead of blanking it.
+  async function loadHistory(id: string): Promise<HistoryMessage[] | null> {
+    try {
+      const r = await fetch(`${API_BASE}/api/chat/sessions/${id}/messages`, {
+        headers: authHeaders(),
+      })
+      if (!r.ok) return null
+      return await r.json()
+    } catch {
+      return null
+    }
+  }
+
   async function touchSession(id: string, message: string) {
     // Bump title/count server-side; called after first user message.
     try {
@@ -99,6 +119,7 @@ export const useSessionsStore = defineStore('sessions', () => {
     createSession,
     deleteSession,
     selectSession,
+    loadHistory,
     touchSession,
   }
 })

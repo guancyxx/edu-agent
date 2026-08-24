@@ -11,7 +11,7 @@ from datetime import datetime
 from typing import Any, Optional
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Depends, HTTPException, Query
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -293,6 +293,94 @@ async def touch_session(
     return _session_out(s)
 
 
+# ── Session history endpoint ────────────────────────────────────────
+
+class HistoryMessage(BaseModel):
+    role: str  # "user" | "assistant" | "summary" (compaction digest)
+    content: str
+
+
+def _history_from_snapshot(snapshot) -> list[HistoryMessage]:
+    """Map a LangGraph StateSnapshot to a chat-history message list.
+
+    human → user, ai → assistant, system (PR#10 compaction summary) →
+    summary; all other message types (tool calls, RemoveMessage markers)
+    are skipped — the frontend only renders conversational turns.
+    """
+    if not snapshot:
+        return []
+    out: list[HistoryMessage] = []
+    for m in (snapshot.values or {}).get("messages", []):
+        if isinstance(m, HumanMessage):
+            role = "user"
+        elif isinstance(m, AIMessage):
+            role = "assistant"
+        elif isinstance(m, SystemMessage):
+            role = "summary"
+        else:
+            continue
+        content = m.content
+        if isinstance(content, list):
+            # multimodal content blocks → concatenate their text parts.
+            # Parts arrive as dicts (e.g. {"type": "text", "text": ...})
+            # — pull "text" from dicts, .text from typed objects.
+            parts = []
+            for p in content:
+                if isinstance(p, str):
+                    parts.append(p)
+                elif isinstance(p, dict):
+                    parts.append(str(p.get("text") or ""))
+                else:
+                    parts.append(str(getattr(p, "text", "") or ""))
+            content = "".join(parts)
+        content = (content or "").strip()
+        if content:
+            out.append(HistoryMessage(role=role, content=content))
+    return out
+
+
+@router.get("/sessions/{session_id}/messages", response_model=list[HistoryMessage])
+async def get_session_messages(
+    session_id: str,
+    user: User = Depends(
+        __import__("app.routers.auth", fromlist=["get_current_user"]).get_current_user
+    ),
+    db: AsyncSession = Depends(get_db),
+):
+    """Return a session's chat history.
+
+    There is no dedicated message table by design: the Postgres
+    checkpointer (thread ``chat-{user_id}-{session_id}``, see PR#6) is
+    the single source of truth for conversation state, so history is
+    available for every session that ever exchanged a message —
+    including sessions created before this endpoint existed.
+    """
+    import uuid as _uuid
+    try:
+        sid = _uuid.UUID(session_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid session id")
+
+    result = await db.execute(
+        select(ChatSessionDB).where(
+            ChatSessionDB.id == sid, ChatSessionDB.user_id == user.id
+        )
+    )
+    if result.scalar_one_or_none() is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    thread_id = f"chat-{user.id}-{sid}"
+    try:
+        snapshot = await get_graph().aget_state(
+            {"configurable": {"thread_id": thread_id}}
+        )
+    except Exception:
+        logger.exception("aget_state failed for thread=%s", thread_id)
+        raise HTTPException(status_code=503, detail="History unavailable, try again")
+
+    return _history_from_snapshot(snapshot)
+
+
 # ── Answer judging endpoint (bypasses the teaching graph) ─────────
 
 class JudgeRequest(BaseModel):
@@ -531,6 +619,7 @@ async def chat_websocket(websocket: WebSocket):
                     # Log teaching event
                     event_log = TeachingEventDB(
                         user_id=str(user.id),
+                        session_id=session_id if isinstance(session_id, str) else None,
                         skill_id=final_skill or "unknown",
                         student_message=message[:2000],
                         skill_output=final_output[:5000] if final_output else None,

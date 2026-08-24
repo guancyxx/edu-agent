@@ -52,12 +52,16 @@
         <div class="panel-body" v-show="!collapsed.chat">
           <div class="messages" ref="messagesContainer">
             <div v-for="(msg, i) in messages" :key="i" class="message" :class="msg.role">
-              <div class="message-avatar">{{ msg.role === 'user' ? '🧑' : '🤖' }}</div>
+              <div class="message-avatar" v-if="msg.role !== 'summary'">{{ msg.role === 'user' ? '🧑' : '🤖' }}</div>
               <div class="message-body">
                 <div class="message-skill" v-if="msg.skill">
                   <span class="skill-tag">{{ msg.skill }}</span>
                 </div>
-                <div class="message-content" v-html="renderMarkdown(msg.content)"></div>
+                <div v-if="msg.role === 'summary'" class="summary-card">
+                  <div class="summary-title">📋 更早的对话已压缩为摘要</div>
+                  <div class="summary-content">{{ msg.content }}</div>
+                </div>
+                <div v-else class="message-content" v-html="renderMarkdown(msg.content)"></div>
               </div>
             </div>
             <div class="message assistant" v-if="loading">
@@ -109,21 +113,21 @@ import SessionsPanel from '../components/SessionsPanel.vue'
 import AnswerBoard from '../components/AnswerBoard.vue'
 
 interface Message {
-  role: 'user' | 'assistant'
+  role: 'user' | 'assistant' | 'summary'
   content: string
   skill?: string
+}
+
+const GREETING: Message = {
+  role: 'assistant',
+  content: '你好！我是你的 AI 学习助手。有什么不会的题目或者概念，随时问我吧！',
 }
 
 const router = useRouter()
 const auth = useAuthStore()
 const sessionsStore = useSessionsStore()
 
-const messages = ref<Message[]>([
-  {
-    role: 'assistant',
-    content: '你好！我是你的 AI 学习助手。有什么不会的题目或者概念，随时问我吧！',
-  },
-])
+const messages = ref<Message[]>([{ ...GREETING }])
 
 const input = ref('')
 const loading = ref(false)
@@ -234,6 +238,26 @@ function importQuestionFromChat() {
   if (vision) q = vision[1].trim()
   answerBoardRef.value?.setQuestion(q)
 }
+
+// ── Session history loading ──────────────────────────────────
+
+// Selecting a session in the panel loads its persisted history into
+// the chat view. Guards against out-of-order responses (only the
+// latest selection may write) and never clobbers a stream in flight —
+// switching mid-stream keeps the current view rather than truncating.
+let historyReqId = 0
+
+watch(() => sessionsStore.currentSessionId, async (id) => {
+  if (!id || loading.value) return
+  const reqId = ++historyReqId
+  const hist = await sessionsStore.loadHistory(id)
+  if (reqId !== historyReqId || sessionsStore.currentSessionId !== id) return
+  if (hist === null) return // fetch failed — keep current view
+  messages.value = hist.length
+    ? hist.map((m) => ({ role: m.role, content: m.content }))
+    : [{ ...GREETING }]
+  scrollToBottom()
+})
 
 // ── WebSocket ──
 
@@ -590,6 +614,29 @@ onUnmounted(() => {
 
 .typing span:nth-child(2) { animation-delay: 0.2s; }
 .typing span:nth-child(3) { animation-delay: 0.4s; }
+
+/* Compaction summary card (PR#10 digest shown in loaded history) */
+.summary-card {
+  align-self: center;
+  max-width: 100%;
+  padding: 10px 14px;
+  border: 1px dashed var(--border);
+  border-radius: 10px;
+  background: var(--bg-tertiary);
+  font-size: 13px;
+}
+
+.summary-title {
+  color: var(--text-secondary);
+  margin-bottom: 4px;
+}
+
+.summary-content {
+  color: var(--text-secondary);
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
 
 @keyframes typing-blink {
   0%, 60%, 100% { opacity: 0.3; }
