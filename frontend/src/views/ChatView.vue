@@ -132,14 +132,13 @@ const messages = ref<Message[]>([{ ...GREETING }])
 const input = ref('')
 const loading = ref(false)
 const connected = ref(false)
-const subject = ref('math')
+const subject = computed({
+  get: () => sessionsStore.currentSubject,
+  set: (v: string) => { sessionsStore.currentSubject = v },
+})
 const messagesContainer = ref<HTMLElement>()
 const inputRef = ref<HTMLElement>()
 const answerBoardRef = ref<InstanceType<typeof AnswerBoard>>()
-
-// Keep the global subject for the sessions panel's new-session button
-;(window as any).__eduCurrentSubject = subject.value
-watch(subject, (v) => { (window as any).__eduCurrentSubject = v })
 
 // ── Collapsible layout state ──
 const collapsed = reactive({ sessions: false, chat: false, board: false })
