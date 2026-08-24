@@ -137,13 +137,13 @@ def test_over_threshold_compacts(monkeypatch):
 
     removals = [op for op in ops if isinstance(op, RemoveMessage)]
     summaries = [op for op in ops if isinstance(op, SystemMessage)]
-    assert len(removals) == 15  # 20 - first(1) - recent(4)
-    assert {r.id for r in removals} == {f"m{i}" for i in range(1, 16)}
+    assert len(removals) == 19  # middle and recent are removed, recent re-appended
+    assert {r.id for r in removals} == {f"m{i}" for i in range(1, 20)}
     assert len(summaries) == 1
     assert stub.calls == 1  # exactly ONE LLM call
 
 
-def test_over_threshold_keeps_first_and_recent_ids(monkeypatch):
+def test_over_threshold_preserves_first_and_reappends_recent(monkeypatch):
     monkeypatch.setattr(settings, "context_window_tokens", 1_000)
     monkeypatch.setattr(settings, "compress_trigger_ratio", 0.5)
     monkeypatch.setattr(settings, "compress_keep_recent", 6)
@@ -154,7 +154,9 @@ def test_over_threshold_keeps_first_and_recent_ids(monkeypatch):
     removed_ids = {r.id for r in ops if isinstance(r, RemoveMessage)}
     assert "m0" not in removed_ids  # first message kept
     for i in range(14, 20):  # last 6 kept
-        assert f"m{i}" not in removed_ids
+        assert f"m{i}" in removed_ids
+    assert [m.content for m in ops[-6:]] == [msgs[i].content for i in range(14, 20)]
+    assert all(m.id is None for m in ops[-6:])
 
 
 def test_llm_failure_returns_empty(monkeypatch, caplog):
@@ -165,16 +167,31 @@ def test_llm_failure_returns_empty(monkeypatch, caplog):
     assert ops == []  # graceful skip — never break the chat
 
 
-def test_small_history_noop(monkeypatch):
-    # History no longer than first + keep_recent: nothing droppable.
+def test_oversized_recent_window_is_halved_for_progress(monkeypatch):
     monkeypatch.setattr(settings, "context_window_tokens", 1)
     monkeypatch.setattr(settings, "compress_trigger_ratio", 1.0)
     monkeypatch.setattr(settings, "compress_keep_recent", 6)
     stub = _StubLLM()
     monkeypatch.setattr("app.engine.llm.get_llm", _stub_get_llm(stub))
     ops = _run(maybe_compact({"messages": _mk_messages(7)}))
+    assert ops
+    assert stub.calls == 2
+    # Initial keep=6 remains too large; the one rebuild uses keep=3.
+    assert [m.content for m in ops[-3:]] == [
+        _mk_messages(7)[i].content for i in range(4, 7)
+    ]
+
+
+def test_pathological_single_message_warns_without_retrigger_loop(monkeypatch, caplog):
+    monkeypatch.setattr(settings, "context_window_tokens", 1)
+    monkeypatch.setattr(settings, "compress_trigger_ratio", 1.0)
+    stub = _StubLLM()
+    monkeypatch.setattr("app.engine.llm.get_llm", _stub_get_llm(stub))
+    with caplog.at_level("WARNING"):
+        ops = _run(maybe_compact({"messages": _mk_messages(1, chars=1_000)}))
     assert ops == []
     assert stub.calls == 0
+    assert "single message is too large" in caplog.text
 
 
 def test_empty_history_noop(monkeypatch):
@@ -183,17 +200,19 @@ def test_empty_history_noop(monkeypatch):
     assert _run(maybe_compact({"messages": []})) == []
 
 
-def test_messages_without_id_skipped_for_removal(monkeypatch):
+def test_messages_without_id_fall_back_to_summary_last(monkeypatch, caplog):
     # Messages lacking .id can't be RemoveMessage'd — no crash, no removal op.
     monkeypatch.setattr(settings, "context_window_tokens", 1_000)
     monkeypatch.setattr(settings, "compress_trigger_ratio", 0.5)
     monkeypatch.setattr(settings, "compress_keep_recent", 2)
     monkeypatch.setattr("app.engine.llm.get_llm", _stub_get_llm(_StubLLM()))
     msgs = _mk_messages(10, chars=80, with_ids=False)
-    ops = _run(maybe_compact({"messages": msgs}))
+    with caplog.at_level("WARNING"):
+        ops = _run(maybe_compact({"messages": msgs}))
     removals = [op for op in ops if isinstance(op, RemoveMessage)]
     assert removals == []  # no ids → no RemoveMessage ops emitted
-    assert any(isinstance(op, SystemMessage) for op in ops)
+    assert isinstance(ops[-1], SystemMessage)
+    assert "falling back to summary-last ordering" in caplog.text
 
 
 # ── add_messages reducer integration ───────────────────────────────
@@ -214,8 +233,9 @@ def test_reducer_applies_removals_and_summary(monkeypatch):
 
     ids = [m.id for m in new_history]
     assert ids[0] == "m0"  # first survives
-    assert set(ids[1:5]) == {"m16", "m17", "m18", "m19"}  # recent window survives
-    assert isinstance(new_history[-1], SystemMessage)  # summary appended last
+    assert isinstance(new_history[1], SystemMessage)
+    assert [m.content for m in new_history[2:]] == [m.content for m in msgs[16:]]
+    assert isinstance(new_history[-1], AIMessage)  # current/recent message stays last
     assert "m5" not in ids  # middle dropped
 
 
@@ -260,6 +280,21 @@ def test_assess_node_ops_flow_through_graph(monkeypatch):
     final = result["messages"]
     ids = [m.id for m in final]
     assert ids[0] == "m0"
-    assert set(ids[1:5]) == {"m16", "m17", "m18", "m19"}
+    assert isinstance(final[1], SystemMessage)
+    assert [m.content for m in final[2:]] == [m.content for m in history[16:]]
     assert "m5" not in ids
-    assert isinstance(final[-1], SystemMessage) and "summary" in final[-1].content
+    assert isinstance(final[-1], AIMessage)
+
+
+def test_compaction_leaves_current_student_message_last(monkeypatch):
+    from langgraph.graph.message import add_messages
+
+    monkeypatch.setattr(settings, "context_window_tokens", 1_000)
+    monkeypatch.setattr(settings, "compress_trigger_ratio", 0.5)
+    monkeypatch.setattr(settings, "compress_keep_recent", 3)
+    monkeypatch.setattr("app.engine.llm.get_llm", _stub_get_llm(_StubLLM()))
+    msgs = _mk_messages(21, chars=80)  # m20 is a HumanMessage
+    final = add_messages(msgs, _run(maybe_compact({"messages": msgs})))
+    assert isinstance(final[1], SystemMessage)
+    assert isinstance(final[-1], HumanMessage)
+    assert final[-1].content == msgs[-1].content

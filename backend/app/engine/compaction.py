@@ -11,9 +11,9 @@ Mechanics
 ---------
 ``TutorState.messages`` uses LangGraph's ``add_messages`` reducer, which
 treats ``RemoveMessage(id=...)`` entries in a node update as deletions.
-:func:`maybe_compact` therefore returns a flat list of message operations —
-``[RemoveMessage(id=...) for dropped, summary SystemMessage]`` — that a node
-merges into its partial update; the reducer applies them atomically.
+:func:`maybe_compact` therefore removes both the dropped middle and the recent
+window, appends the summary, then re-appends the recent window.  This leaves
+the current student message last, where downstream nodes expect it.
 
 Verified reducer behaviour (langgraph 0.6.11): ``add_messages`` auto-assigns
 an id to appended messages that lack one, but raises ``ValueError`` when asked
@@ -126,8 +126,7 @@ async def maybe_compact(state: dict[str, Any]) -> list:  # noqa: ANN401 — Lang
     list
         ``[]`` when the history is under the trigger threshold (or the
         summarization LLM call failed — compaction never breaks the chat),
-        otherwise ``[RemoveMessage(id=...) for each dropped message] +
-        [summary SystemMessage]`` for the ``add_messages`` reducer.
+        otherwise message operations for the ``add_messages`` reducer.
     """
     messages = list(state.get("messages", []) or [])
     if not messages:
@@ -137,47 +136,80 @@ async def maybe_compact(state: dict[str, Any]) -> list:  # noqa: ANN401 — Lang
     estimated = estimate_tokens(messages)
     if estimated <= threshold:
         return []
-
-    keep_recent = max(0, int(settings.compress_keep_recent))
-    # Segments: [first] + [middle …dropped…] + [last keep_recent]
-    if len(messages) <= keep_recent + 1:
-        # Nothing droppable — the window already covers (almost) everything.
+    if len(messages) == 1:
+        logger.warning(
+            "maybe_compact: compacted history remains over threshold; the single "
+            "message is too large to reduce without truncating content"
+        )
         return []
 
-    first, middle, recent = messages[0], messages[1:-keep_recent], messages[-keep_recent:]
+    keep_recent = max(1, int(settings.compress_keep_recent))
 
+    async def build(candidate_keep: int) -> tuple[list, list[BaseMessage]]:
+        middle = messages[1:-candidate_keep]
+        recent = messages[-candidate_keep:]
+        summary_text = await _summarize_segment(middle)
+        summary = SystemMessage(content=f"[history summary] {summary_text}")
+
+        ops: list = []
+        missing_middle = [m for m in middle if not getattr(m, "id", None)]
+        recent_removable = all(getattr(m, "id", None) for m in recent)
+        for message in middle:
+            if getattr(message, "id", None):
+                ops.append(RemoveMessage(id=message.id))
+        if missing_middle:
+            logger.warning(
+                "maybe_compact: %d dropped messages had no id — they cannot be "
+                "removed via RemoveMessage and will persist in history",
+                len(missing_middle),
+            )
+
+        if recent_removable:
+            ops.extend(RemoveMessage(id=message.id) for message in recent)
+            ops.append(summary)
+            # add_messages resolves same-id entries against their original
+            # positions even if a RemoveMessage for that id appears earlier
+            # in the same update.  Clear ids so these are genuinely appended
+            # after the summary; the reducer assigns fresh ids.
+            ops.extend(message.model_copy(update={"id": None}) for message in recent)
+        else:
+            logger.warning(
+                "maybe_compact: recent window contains messages without id; "
+                "falling back to summary-last ordering"
+            )
+            ops.append(summary)
+        return ops, [messages[0], summary, *recent]
+
+    # Segments: [first] + [middle …dropped…] + [last keep_recent].  A
+    # too-large configured window is reduced once to guarantee normal-case
+    # progress without truncating any individual message.
+    keep_recent = min(keep_recent, max(1, len(messages) - 1))
     logger.info(
-        "maybe_compact: estimated_tokens=%d > threshold=%d — summarizing %d middle messages",
-        estimated, int(threshold), len(middle),
+        "maybe_compact: estimated_tokens=%d > threshold=%d — compacting with %d recent messages",
+        estimated, int(threshold), keep_recent,
     )
     try:
-        summary_text = await _summarize_segment(middle)
+        ops, resulting = await build(keep_recent)
+        if estimate_tokens(resulting) >= threshold and keep_recent > 1:
+            keep_recent = max(1, keep_recent // 2)
+            logger.info(
+                "maybe_compact: result remains over budget; rebuilding with %d recent messages",
+                keep_recent,
+            )
+            ops, resulting = await build(keep_recent)
     except Exception as exc:
         logger.warning(
             "maybe_compact: summarization failed (%s) — skipping this round", exc
         )
         return []
 
-    ops: list = []
-    dropped_without_id = 0
-    for message in middle:
-        mid = getattr(message, "id", None)
-        if mid:
-            # add_messages raises on RemoveMessage for a non-existent id, so
-            # only emit removals for messages we actually saw an id on.
-            ops.append(RemoveMessage(id=mid))
-        else:
-            dropped_without_id += 1
-    if dropped_without_id:
+    if estimate_tokens(resulting) >= threshold:
         logger.warning(
-            "maybe_compact: %d dropped messages had no id — they cannot be "
-            "removed via RemoveMessage and will persist in history",
-            dropped_without_id,
+            "maybe_compact: compacted history remains over threshold; a retained "
+            "message or summary is too large to reduce without truncating content"
         )
-
-    ops.append(SystemMessage(content=f"[history summary] {summary_text}"))
     logger.info(
-        "maybe_compact: compacted %d messages into 1 summary SystemMessage",
-        len(middle),
+        "maybe_compact: compacted history into 1 summary SystemMessage with %d recent messages",
+        keep_recent,
     )
     return ops
