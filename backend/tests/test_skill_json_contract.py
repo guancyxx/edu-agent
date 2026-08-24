@@ -35,7 +35,8 @@ def test_concept_explain_prompt_contains_contract():
     assert '"output"' in prompt and '"comprehension"' in prompt and '"knowledge_delta"' in prompt
     assert "```json" in prompt
     assert "`7-1-3`" in prompt  # curriculum menu rendered
-    assert "{{ concept_id }}" in prompt or "7-1-3" in prompt
+    assert "{{ concept_id }}" not in prompt  # resolved, not raw
+    assert "7-1-3" in prompt
 
 
 def test_knowledge_check_prompt_contains_contract():
@@ -46,7 +47,8 @@ def test_knowledge_check_prompt_contains_contract():
         "curriculum_kps": KP_MENU, "previous_output": "讲解内容",
     })
     assert '"output"' in prompt and '"comprehension"' in prompt and '"knowledge_delta"' in prompt
-    assert '"understood"' in prompt
+    assert '"comprehension": "understood"' in prompt
+    assert '"knowledge_delta": {}' in prompt
 
 
 def test_runner_parses_compliant_reply():

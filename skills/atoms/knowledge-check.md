@@ -41,7 +41,7 @@ Generate 2 questions at different difficulty levels:
 
 ## Output Format
 
-Your ENTIRE response must be ONE fenced ```json code block containing the questions in a "output" string, plus assessment fields:
+Your ENTIRE response must be ONE fenced ```json code block and NOTHING else — no prose before or after it. The block contains the questions in a "output" string, plus assessment fields:
 ```json
 {
   "output": "<full markdown with **Q1**/**Q2** and collapsible <details> answers, exactly as specified above>",
