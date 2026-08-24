@@ -470,8 +470,21 @@ async def send_message(
         config={"configurable": {"thread_id": thread_id}},
     )
 
+    reply = result.get("skill_output", "")
+
+    # Append the assistant reply to the checkpointed history (same reason
+    # as the WS path: the graph never adds an AIMessage itself). Best-effort.
+    if reply:
+        try:
+            await get_graph().aupdate_state(
+                {"configurable": {"thread_id": thread_id}},
+                {"messages": [AIMessage(content=reply)]},
+            )
+        except Exception:
+            logger.warning("Failed to append reply to thread=%s", thread_id, exc_info=True)
+
     return ChatResponse(
-        reply=result.get("skill_output", ""),
+        reply=reply,
         skill_used=result.get("selected_skill", "unknown"),
         comprehension=result.get("comprehension_signal", "no_response"),
         iteration_count=result.get("iteration_count", 0),
@@ -628,6 +641,24 @@ async def chat_websocket(websocket: WebSocket):
                     )
                     db.add(event_log)
                     await db.commit()
+
+                # Append the assistant reply to the checkpointed history.
+                # The graph stores the reply in the plain ``skill_output``
+                # state field and never adds an AIMessage to the messages
+                # channel — without this, GET /sessions/{id}/messages would
+                # show only student turns.  Best-effort: a failure must not
+                # break the chat turn.
+                if final_output:
+                    try:
+                        await get_graph().aupdate_state(
+                            {"configurable": {"thread_id": thread_id}},
+                            {"messages": [AIMessage(content=final_output)]},
+                        )
+                    except Exception:
+                        logger.warning(
+                            "Failed to append assistant reply to thread=%s",
+                            thread_id, exc_info=True,
+                        )
 
                 await websocket.send_text(json.dumps({
                     "type": "done",
