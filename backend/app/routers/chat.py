@@ -33,7 +33,26 @@ router = APIRouter(prefix="/api/chat", tags=["chat"])
 _skill_loader = SkillLoader()
 _loaded_skills = _skill_loader.load_directory("../skills")
 _catalog = SkillCatalog(_loaded_skills)
-_tutor_graph = build_tutor_graph()
+
+# Mutable holder for the compiled tutor graph.  At runtime main.py's lifespan
+# injects a Postgres-checkpointer-backed graph via set_graph(); until then
+# (and in tests that never run lifespan) get_graph() lazily builds one with
+# the in-process MemorySaver fallback.
+_tutor_graph = None
+
+
+def set_graph(g) -> None:
+    """Inject the production graph (e.g. Postgres-checkpointer-backed)."""
+    global _tutor_graph
+    _tutor_graph = g
+
+
+def get_graph():
+    """Return the injected graph, or lazily build a MemorySaver one."""
+    global _tutor_graph
+    if _tutor_graph is None:
+        _tutor_graph = build_tutor_graph()
+    return _tutor_graph
 
 
 async def _extract_text_from_images(
@@ -103,6 +122,7 @@ async def _get_user_from_ws_token(websocket: WebSocket, db: AsyncSession) -> Opt
 class ChatRequest(BaseModel):
     message: str
     subject: str = "math"
+    session_id: Optional[str] = None
 
 
 class ChatResponse(BaseModel):
@@ -324,9 +344,16 @@ async def send_message(
     state_dict["role"] = user.role
     state_dict["iteration_count"] = 0
 
-    result = await _tutor_graph.ainvoke(
+    # Stable thread per chat session so the checkpointer resumes state;
+    # random thread keeps old behavior when no session is supplied.
+    if req.session_id:
+        thread_id = f"chat-{req.session_id}"
+    else:
+        thread_id = f"{user.id}-{uuid.uuid4().hex[:8]}"
+
+    result = await get_graph().ainvoke(
         {"messages": [HumanMessage(content=req.message)], **state_dict},
-        config={"configurable": {"thread_id": f"{user.id}-{uuid.uuid4().hex[:8]}"}},
+        config={"configurable": {"thread_id": thread_id}},
     )
 
     return ChatResponse(
@@ -404,7 +431,14 @@ async def chat_websocket(websocket: WebSocket):
             state_dict["role"] = user.role
             state_dict["iteration_count"] = 0
 
-            thread_id = f"{user.id}-{uuid.uuid4().hex[:8]}"
+            # Stable thread per chat session so the checkpointer resumes
+            # state across messages/restarts; random thread keeps the old
+            # behavior when the client sends no session_id.
+            session_id = data.get("session_id")
+            if session_id:
+                thread_id = f"chat-{session_id}"
+            else:
+                thread_id = f"{user.id}-{uuid.uuid4().hex[:8]}"
             logger.info(
                 "Processing: user=%s thread=%s images=%d",
                 user.username, thread_id, len(images),
@@ -416,7 +450,7 @@ async def chat_websocket(websocket: WebSocket):
                 final_comprehension = "no_response"
                 final_iteration = 0
 
-                async for event in _tutor_graph.astream_events(
+                async for event in get_graph().astream_events(
                     {"messages": [human_message], **state_dict},
                     config={"configurable": {"thread_id": thread_id}},
                     version="v2",

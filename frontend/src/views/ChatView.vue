@@ -339,50 +339,58 @@ function send() {
 
   messages.value.push({ role: 'assistant', content: '' })
 
-  // Ensure we have a session to attribute this message to
+  // Ensure we have a session to attribute this message to.  The send itself
+  // happens inside the session-create .then() so the first message always
+  // carries the fresh session_id (stable backend thread_id) — sending before
+  // session creation raced and produced a session-less first message.
+  const deliver = () => {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({
+        message: text,
+        subject: subject.value,
+        session_id: sessionsStore.currentSessionId || undefined,
+      }))
+    } else {
+      fetch('http://localhost:8000/api/chat/send', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${auth.token}`,
+        },
+        body: JSON.stringify({
+          message: text,
+          subject: subject.value,
+          session_id: sessionsStore.currentSessionId || undefined,
+        }),
+      })
+        .then(r => r.json())
+        .then(data => {
+          loading.value = false
+          const last = messages.value[messages.value.length - 1]
+          if (last && last.role === 'assistant') {
+            last.content = data.reply
+            last.skill = data.skill_used
+          }
+          scrollToBottom()
+        })
+        .catch(err => {
+          loading.value = false
+          const last = messages.value[messages.value.length - 1]
+          if (last && last.role === 'assistant') {
+            last.content = `⚠️ 连接失败: ${err.message}`
+          }
+        })
+    }
+  }
+
   if (!sessionsStore.currentSessionId) {
     sessionsStore.createSession(subject.value).then(() => {
       sessionsStore.touchSession(sessionsStore.currentSessionId, text)
+      deliver()
     })
   } else {
     sessionsStore.touchSession(sessionsStore.currentSessionId, text)
-  }
-
-  if (ws && ws.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify({
-      message: text,
-      subject: subject.value,
-      session_id: sessionsStore.currentSessionId || undefined,
-    }))
-  } else {
-    fetch('http://localhost:8000/api/chat/send', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${auth.token}`,
-      },
-      body: JSON.stringify({
-        message: text,
-        subject: subject.value,
-      }),
-    })
-      .then(r => r.json())
-      .then(data => {
-        loading.value = false
-        const last = messages.value[messages.value.length - 1]
-        if (last && last.role === 'assistant') {
-          last.content = data.reply
-          last.skill = data.skill_used
-        }
-        scrollToBottom()
-      })
-      .catch(err => {
-        loading.value = false
-        const last = messages.value[messages.value.length - 1]
-        if (last && last.role === 'assistant') {
-          last.content = `⚠️ 连接失败: ${err.message}`
-        }
-      })
+    deliver()
   }
 
   scrollToBottom()
