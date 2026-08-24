@@ -206,6 +206,20 @@ async def assess_node(state: TutorState) -> dict[str, Any]:
 
 
 async def router_node(state: TutorState) -> dict[str, Any]:
+    """Public router entry: delegates to ``_router_node_inner`` and bumps the
+    loop-cycle counter so ``observe_node``'s MAX_ITERATIONS guard can fire.
+
+    assess_node seeds the counter (1) once per graph run; every router visit
+    means one more assess→observe cycle attempt. Without this bump the loop
+    edge (observe→router) never revisits assess and the guard never triggers
+    (GraphRecursionError at LangGraph's limit — live-proven 2026-08-24).
+    """
+    update = await _router_node_inner(state)
+    update["iteration_count"] = state.get("iteration_count", 0) + 1
+    return update
+
+
+async def _router_node_inner(state: TutorState) -> dict[str, Any]:
     """Select which skill should handle this turn.
 
     1. Visual-request short-circuit: explicit "draw me a picture" phrasing →

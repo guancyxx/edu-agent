@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import json
 
+from app.engine import nodes
 from app.skills.loader import SkillLoader
 from app.skills.runner import _parse_result, render_prompt
+from langchain_core.messages import HumanMessage
 
 KP_MENU = [
     {"id": "7-1-3", "title": "有理数的加减法", "difficulty": 2, "description": "...", "prerequisites": ["7-1-2"]},
@@ -87,3 +89,35 @@ def test_contract_survives_empty_curriculum():
     })
     assert '"knowledge_delta"' in prompt  # contract instructions survive empty menu
     assert "## Curriculum Knowledge Points" not in prompt  # menu section hidden
+
+
+async def test_router_bumps_iteration_count():
+    state = {
+        "messages": [HumanMessage(content="画个图讲讲负数")],
+        "emotion_state": {},
+    }
+    out = await nodes.router_node(state)
+    assert out["selected_skill"] == "picture-explain"
+    assert out["iteration_count"] == 1
+
+
+async def test_confused_loop_terminates_at_max_iterations():
+    from app.engine.nodes import observe_node
+    state = {
+        "messages": [HumanMessage(content="还是不懂")],
+        "comprehension_signal": "confused",
+        "iteration_count": 3,
+    }
+    out = await observe_node(state)
+    assert out["should_continue"] is False
+
+
+async def test_confused_continues_below_max_iterations():
+    from app.engine.nodes import observe_node
+    state = {
+        "messages": [HumanMessage(content="还是不懂")],
+        "comprehension_signal": "confused",
+        "iteration_count": 2,
+    }
+    out = await observe_node(state)
+    assert out["should_continue"] is True
