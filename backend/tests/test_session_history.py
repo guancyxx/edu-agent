@@ -140,3 +140,78 @@ async def test_endpoint_503_when_checkpointer_fails(graph_spy, monkeypatch):
     with pytest.raises(HTTPException) as ei:
         await chat.get_session_messages(str(s.id), user, FakeDB(s))
     assert ei.value.status_code == 503
+
+
+async def test_send_message_appends_ai_reply_to_checkpointer(monkeypatch):
+    """R2 (audit PR#12): HTTP send must persist the reply as an AIMessage.
+
+    The graph never adds one itself (skill_output is a plain state
+    field) — without the aupdate_state call, history endpoints show
+    one-sided conversations.
+    """
+    from langchain_core.messages import AIMessage
+
+    user = _user()
+    sid = str(uuid_mod.uuid4())
+    updates = []
+
+    class FakeGraph:
+        async def ainvoke(self, state, config):
+            return {
+                "skill_output": "回复内容",
+                "selected_skill": "concept-explain",
+                "comprehension_signal": "understood",
+                "iteration_count": 1,
+            }
+
+        async def aupdate_state(self, config, values):
+            updates.append((config["configurable"]["thread_id"], values))
+
+    monkeypatch.setattr(chat, "get_graph", lambda: FakeGraph())
+
+    fake_profile_store = SimpleNamespace(
+        load=AsyncMock(return_value=SimpleNamespace(
+            to_state_dict=lambda: {}, total_messages=0, primary_subject="math",
+        )),
+        save=AsyncMock(),
+    )
+    monkeypatch.setattr(chat, "profile_store", fake_profile_store)
+
+    resp = await chat.send_message(
+        chat.ChatRequest(message="问题", subject="math", session_id=sid), user
+    )
+    assert resp.reply == "回复内容"
+    assert len(updates) == 1
+    thread_id, values = updates[0]
+    assert thread_id == f"chat-{user.id}-{sid}"
+    (msg,) = values["messages"]
+    assert isinstance(msg, AIMessage)
+    assert msg.content == "回复内容"
+
+
+async def test_send_message_survives_aupdate_failure(monkeypatch):
+    """aupdate_state is best-effort: a failure must not break the turn."""
+    user = _user()
+    sid = str(uuid_mod.uuid4())
+
+    class BrokenUpdateGraph:
+        async def ainvoke(self, state, config):
+            return {"skill_output": "回复", "selected_skill": "s",
+                    "comprehension_signal": "ok", "iteration_count": 1}
+
+        async def aupdate_state(self, config, values):
+            raise RuntimeError("checkpoint write failed")
+
+    monkeypatch.setattr(chat, "get_graph", lambda: BrokenUpdateGraph())
+    fake_profile_store = SimpleNamespace(
+        load=AsyncMock(return_value=SimpleNamespace(
+            to_state_dict=lambda: {}, total_messages=0, primary_subject="math",
+        )),
+        save=AsyncMock(),
+    )
+    monkeypatch.setattr(chat, "profile_store", fake_profile_store)
+
+    resp = await chat.send_message(
+        chat.ChatRequest(message="问题", subject="math", session_id=sid), user
+    )
+    assert resp.reply == "回复"  # turn still succeeds

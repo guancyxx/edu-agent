@@ -369,7 +369,10 @@ async def get_session_messages(
     if result.scalar_one_or_none() is None:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    thread_id = f"chat-{user.id}-{sid}"
+    thread_id = _thread_id_for(user.id, str(sid))
+    if thread_id is None:
+        # Unreachable (sid already parsed as UUID), kept as a guard.
+        raise HTTPException(status_code=400, detail="Invalid session id")
     try:
         snapshot = await get_graph().aget_state(
             {"configurable": {"thread_id": thread_id}}
