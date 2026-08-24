@@ -34,8 +34,16 @@ from app.engine.state import TutorState
 logger = logging.getLogger("edu-agent.engine")
 
 
-def build_tutor_graph():
+def build_tutor_graph(checkpointer=None):
     """Build and compile the tutoring ``StateGraph``.
+
+    Parameters
+    ----------
+    checkpointer : optional
+        A LangGraph checkpointer (e.g. ``PostgresSaver``) used to persist
+        thread state across invocations/restarts.  Falls back to an
+        in-process ``MemorySaver`` when omitted, so imports and tests work
+        without a database.
 
     Returns
     -------
@@ -66,7 +74,7 @@ def build_tutor_graph():
 
     graph.add_edge("update", END)
 
-    return graph.compile(checkpointer=MemorySaver())
+    return graph.compile(checkpointer=checkpointer if checkpointer is not None else MemorySaver())
 
 
 # Module-level singleton. Wrapped so that importing this package never raises
