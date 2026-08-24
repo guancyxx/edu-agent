@@ -5,8 +5,12 @@ dict of the fields it wants to update; LangGraph merges them back automatically.
 
 Design notes
 ------------
-* ``messages`` uses the LangGraph reducer pattern so new messages are appended
-  rather than replacing the whole history.
+* ``messages`` uses LangGraph's official ``add_messages`` reducer so new
+  messages are appended rather than replacing the whole history — and, crucially,
+  ``RemoveMessage(id=...)`` entries in a node update *delete* the matching
+  message.  This is what enables token-budget-driven history compaction
+  (``app.engine.compaction.maybe_compact``): a node can drop stale middle
+  messages and insert a summary SystemMessage in a single partial update.
 * Emotion and mastery values are floats in ``[0.0, 1.0]``.
 * ``knowledge_delta`` captures the change in mastery produced during a single
   graph run, so ``update_node`` can persist it to the student profile.
@@ -14,10 +18,10 @@ Design notes
 
 from __future__ import annotations
 
-from operator import add
 from typing import Annotated, Literal, TypedDict
 
 from langchain_core.messages import BaseMessage
+from langgraph.graph.message import add_messages
 
 
 class TutorState(TypedDict):
@@ -26,8 +30,10 @@ class TutorState(TypedDict):
     Attributes
     ----------
     messages:
-        Conversation history. The ``add`` reducer appends new messages on each
-        node update instead of overwriting.
+        Conversation history. The ``add_messages`` reducer appends new
+        messages on each node update instead of overwriting, and processes
+        ``RemoveMessage(id=...)`` entries as deletions (used by history
+        compaction).
     student_id:
         Unique identifier of the student the graph is serving.
     role:
@@ -74,7 +80,7 @@ class TutorState(TypedDict):
     """
 
     # --- conversation ---
-    messages: Annotated[list[BaseMessage], add]
+    messages: Annotated[list[BaseMessage], add_messages]
 
     # --- student identity & context ---
     student_id: str

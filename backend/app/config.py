@@ -28,6 +28,11 @@ class Settings(BaseSettings):
     # Skills
     skills_dir: str = "../skills"
 
+    # Conversation-history compaction
+    context_window_tokens: int = 65536
+    compress_trigger_ratio: float = 0.75
+    compress_keep_recent: int = 6
+
     # Feature flags
     use_langgraph: bool = True
 

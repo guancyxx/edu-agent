@@ -20,6 +20,7 @@ import uuid
 from typing import Any
 
 from app.engine.state import TutorState
+from app.engine.compaction import maybe_compact
 from app.skills.loader import SkillLoader
 from app.skills.catalog import SkillCatalog
 from app.skills.runner import render_prompt, _extract_json_block
@@ -86,6 +87,12 @@ async def assess_node(state: TutorState) -> dict[str, Any]:
     2. Run the ``emotion-analyzer`` meta-skill (single LLM call) to score the
        latest message along four emotion dimensions, so ``router_node`` can
        apply the emotion short-circuit.
+
+    Additionally, at the very top it runs token-budget-driven history
+    compaction (``maybe_compact``): when the conversation exceeds the
+    configured context budget, the returned message-ops (``RemoveMessage`` +
+    summary ``SystemMessage``) are merged into this node's partial update and
+    applied atomically by the ``add_messages`` reducer.
     """
     iteration = state.get("iteration_count", 0)
     student_id = state.get("student_id", "")
@@ -94,6 +101,17 @@ async def assess_node(state: TutorState) -> dict[str, Any]:
     if messages:
         last = messages[-1]
         user_text = getattr(last, "content", "") or ""
+
+    update: dict[str, Any] = {"iteration_count": iteration + 1}
+
+    # 0. History compaction — merge message-ops into this node's update so
+    # the add_messages reducer applies removals + summary atomically.
+    try:
+        message_ops = await maybe_compact(state)
+        if message_ops:
+            update["messages"] = message_ops
+    except Exception as e:
+        logger.warning("assess_node: compaction failed (%s)", e)
 
     logger.info(
         "assess_node: student=%s subject=%s grade=%s iteration=%d",
@@ -113,7 +131,6 @@ async def assess_node(state: TutorState) -> dict[str, Any]:
         except Exception as e:
             logger.warning("assess_node: could not load profile (%s)", e)
 
-    update: dict[str, Any] = {"iteration_count": iteration + 1}
     if profile_data:
         for key in ("knowledge_mastery", "emotion_state", "ability_level",
                      "learning_style", "recent_mistakes", "grade"):
