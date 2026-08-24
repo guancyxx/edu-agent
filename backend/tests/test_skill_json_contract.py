@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import json
 
+from app.engine import nodes
 from app.skills.loader import SkillLoader
 from app.skills.runner import _parse_result, render_prompt
+from langchain_core.messages import HumanMessage
 
 KP_MENU = [
     {"id": "7-1-3", "title": "有理数的加减法", "difficulty": 2, "description": "...", "prerequisites": ["7-1-2"]},
@@ -87,3 +89,111 @@ def test_contract_survives_empty_curriculum():
     })
     assert '"knowledge_delta"' in prompt  # contract instructions survive empty menu
     assert "## Curriculum Knowledge Points" not in prompt  # menu section hidden
+
+
+async def test_router_bumps_iteration_count():
+    state = {
+        "messages": [HumanMessage(content="画个图讲讲负数")],
+        "emotion_state": {},
+    }
+    out = await nodes.router_node(state)
+    assert out["selected_skill"] == "picture-explain"
+    assert out["iteration_count"] == 1
+
+
+async def test_confused_loop_terminates_at_max_iterations():
+    from app.engine.nodes import observe_node
+    state = {
+        "messages": [HumanMessage(content="还是不懂")],
+        "comprehension_signal": "confused",
+        "iteration_count": 3,
+    }
+    out = await observe_node(state)
+    assert out["should_continue"] is False
+
+
+async def test_confused_continues_below_max_iterations():
+    from app.engine.nodes import observe_node
+    state = {
+        "messages": [HumanMessage(content="还是不懂")],
+        "comprehension_signal": "confused",
+        "iteration_count": 2,
+    }
+    out = await observe_node(state)
+    assert out["should_continue"] is True
+
+
+async def test_confused_chain_executes_exactly_three_times(monkeypatch):
+    """Composition: assess seeds 0, router bumps per visit, observe stops at 3.
+
+    Regression for the audit off-by-one (PR #11): the chain must yield
+    exactly MAX_ITERATIONS execute attempts, not one fewer.
+    """
+
+    async def fake_llm_json(skill, s):
+        if getattr(skill, "name", "") == "emotion-analyzer":
+            return {"frustration": 0.1}
+        return {
+            "selected_skill": "concept-explain",
+            "skill_layer": "atom",
+            "skill_params": {},
+            "reason": "t",
+        }
+
+    monkeypatch.setattr(nodes, "_llm_json", fake_llm_json)
+
+    # Real execute_node, LLM mocked at the seam get_llm exposes: the fake
+    # model replies with the A4 JSON contract (always confused), so the
+    # full assess→router→execute→observe chain runs end-to-end with only
+    # the model layer faked.
+    from app.engine import llm as llm_mod
+
+    class FakeMessage:
+        def __init__(self, content):
+            self.content = content
+
+    class FakeLLM:
+        async def ainvoke(self, messages):
+            payload = json.dumps(
+                {
+                    "output": "再讲一遍，换个角度。",
+                    "comprehension": "confused",
+                    "knowledge_delta": {"7-1-3": 0.3},
+                },
+                ensure_ascii=False,
+            )
+            return FakeMessage(f"```json\n{payload}\n```")
+
+    monkeypatch.setattr(llm_mod, "get_llm", lambda: FakeLLM())
+
+    state = {
+        "messages": [HumanMessage(content="听不懂")],
+        "emotion_state": {},
+        "subject": "math",
+        "grade": 7,
+        "student_id": "",
+    }
+    state.update(await nodes.assess_node(state))
+    executes = 0
+    for _ in range(10):
+        state.update(await nodes.router_node(state))
+        result = await nodes.execute_node(state)
+        state.update(result)
+        executes += 1
+        assert state["comprehension_signal"] == "confused"
+        state.update(await nodes.observe_node(state))
+        if not state["should_continue"]:
+            break
+    assert executes == 3
+    assert state["iteration_count"] == 3
+    assert state["knowledge_delta"] == {"7-1-3": 0.3}
+
+
+async def test_emotion_branch_also_bumps():
+    state = {
+        "messages": [HumanMessage(content="好难啊")],
+        "emotion_state": {"frustration": 0.9},
+    }
+    out = await nodes.router_node(state)
+    assert out["selected_skill"] == "emotion-respond"
+    assert out["iteration_count"] == 1
