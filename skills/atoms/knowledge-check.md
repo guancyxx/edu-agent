@@ -41,17 +41,16 @@ Generate 2 questions at different difficulty levels:
 
 ## Output Format
 
-For each question provide:
+Your ENTIRE response must be ONE fenced ```json code block containing the questions in a "output" string, plus assessment fields:
+```json
+{
+  "output": "<full markdown with **Q1**/**Q2** and collapsible <details> answers, exactly as specified above>",
+  "comprehension": "understood",
+  "knowledge_delta": {}
+}
 ```
-**Q[number]**: [question text]
-
-<details>
-<summary>Answer</summary>
-
-[expected answer with brief explanation]
-
-</details>
-```
+- The questions themselves (Q1 basic + Q2 applied, `<details>` tags, 2-minute rule) keep ALL formatting rules from the Instructions section — they now live inside the JSON "output" string.
+- "comprehension" is ALWAYS "understood" for this skill: the student has not answered yet, so the engine must not loop or record mistakes at question time. "knowledge_delta" is ALWAYS {} — mastery updates happen after the student's answer is judged, not at question generation time.
 
 ## Rules
 
