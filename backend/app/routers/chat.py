@@ -41,6 +41,33 @@ _catalog = SkillCatalog(_loaded_skills)
 _tutor_graph = None
 
 
+def _thread_id_for(user_id: Any, session_id: Any) -> Optional[str]:
+    """Build a checkpointer thread_id bound to the session OWNER.
+
+    Returns ``chat-{user_id}-{session_id}`` only when session_id is a
+    non-empty string that parses as a UUID; otherwise returns None so the
+    caller falls back to a random thread.  Binding user_id into the thread
+    means a stolen session UUID can only write to the attacker's own
+    thread, never the victim's (audit PR#6 R1).
+    """
+    if not isinstance(session_id, str) or not session_id:
+        if session_id is not None:
+            logger.warning(
+                "Invalid session_id type %r for user=%s; using random thread",
+                type(session_id).__name__, user_id,
+            )
+        return None
+    try:
+        uuid.UUID(session_id)
+    except (ValueError, AttributeError, TypeError):
+        logger.warning(
+            "session_id %r is not a valid UUID for user=%s; using random thread",
+            session_id[:64], user_id,
+        )
+        return None
+    return f"chat-{user_id}-{session_id}"
+
+
 def set_graph(g) -> None:
     """Inject the production graph (e.g. Postgres-checkpointer-backed)."""
     global _tutor_graph
@@ -345,11 +372,10 @@ async def send_message(
     state_dict["iteration_count"] = 0
 
     # Stable thread per chat session so the checkpointer resumes state;
-    # random thread keeps old behavior when no session is supplied.
-    if req.session_id:
-        thread_id = f"chat-{req.session_id}"
-    else:
-        thread_id = f"{user.id}-{uuid.uuid4().hex[:8]}"
+    # random thread keeps old behavior when no/invalid session is supplied.
+    thread_id = _thread_id_for(user.id, req.session_id) or (
+        f"{user.id}-{uuid.uuid4().hex[:8]}"
+    )
 
     result = await get_graph().ainvoke(
         {"messages": [HumanMessage(content=req.message)], **state_dict},
@@ -433,12 +459,11 @@ async def chat_websocket(websocket: WebSocket):
 
             # Stable thread per chat session so the checkpointer resumes
             # state across messages/restarts; random thread keeps the old
-            # behavior when the client sends no session_id.
+            # behavior when the client sends no (or an invalid) session_id.
             session_id = data.get("session_id")
-            if session_id:
-                thread_id = f"chat-{session_id}"
-            else:
-                thread_id = f"{user.id}-{uuid.uuid4().hex[:8]}"
+            thread_id = _thread_id_for(user.id, session_id) or (
+                f"{user.id}-{uuid.uuid4().hex[:8]}"
+            )
             logger.info(
                 "Processing: user=%s thread=%s images=%d",
                 user.username, thread_id, len(images),
