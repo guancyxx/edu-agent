@@ -121,3 +121,51 @@ async def test_confused_continues_below_max_iterations():
     }
     out = await observe_node(state)
     assert out["should_continue"] is True
+
+
+async def test_confused_chain_executes_exactly_three_times(monkeypatch):
+    """Composition: assess seeds 0, router bumps per visit, observe stops at 3.
+
+    Regression for the audit off-by-one (PR #11): the chain must yield
+    exactly MAX_ITERATIONS execute attempts, not one fewer.
+    """
+
+    async def fake_llm_json(skill, s):
+        if getattr(skill, "name", "") == "emotion-analyzer":
+            return {"frustration": 0.1}
+        return {
+            "selected_skill": "concept-explain",
+            "skill_layer": "atom",
+            "skill_params": {},
+            "reason": "t",
+        }
+
+    monkeypatch.setattr(nodes, "_llm_json", fake_llm_json)
+    state = {
+        "messages": [HumanMessage(content="听不懂")],
+        "emotion_state": {},
+        "subject": "math",
+        "grade": 7,
+        "student_id": "",
+    }
+    state.update(await nodes.assess_node(state))
+    executes = 0
+    for _ in range(10):
+        state.update(await nodes.router_node(state))
+        executes += 1  # execute runs right after router
+        state["comprehension_signal"] = "confused"
+        state.update(await nodes.observe_node(state))
+        if not state["should_continue"]:
+            break
+    assert executes == 3
+    assert state["iteration_count"] == 3
+
+
+async def test_emotion_branch_also_bumps():
+    state = {
+        "messages": [HumanMessage(content="好难啊")],
+        "emotion_state": {"frustration": 0.9},
+    }
+    out = await nodes.router_node(state)
+    assert out["selected_skill"] == "emotion-respond"
+    assert out["iteration_count"] == 1

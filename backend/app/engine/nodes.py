@@ -113,7 +113,11 @@ async def assess_node(state: TutorState) -> dict[str, Any]:
         except Exception as e:
             logger.warning("assess_node: could not load profile (%s)", e)
 
-    update: dict[str, Any] = {"iteration_count": iteration + 1}
+    # Seed 0, not 1: router_node bumps the counter before every execute, so
+    # after N executes the counter == N and observe_node's
+    # ``iteration >= MAX_ITERATIONS`` guard stops the loop after exactly
+    # MAX_ITERATIONS execute attempts (audit fix, PR #11).
+    update: dict[str, Any] = {"iteration_count": iteration}
     if profile_data:
         for key in ("knowledge_mastery", "emotion_state", "ability_level",
                      "learning_style", "recent_mistakes", "grade"):
@@ -209,10 +213,12 @@ async def router_node(state: TutorState) -> dict[str, Any]:
     """Public router entry: delegates to ``_router_node_inner`` and bumps the
     loop-cycle counter so ``observe_node``'s MAX_ITERATIONS guard can fire.
 
-    assess_node seeds the counter (1) once per graph run; every router visit
-    means one more assess→observe cycle attempt. Without this bump the loop
-    edge (observe→router) never revisits assess and the guard never triggers
-    (GraphRecursionError at LangGraph's limit — live-proven 2026-08-24).
+    assess_node seeds the counter at 0; every router visit bumps it before
+    the upcoming execute, so the counter always equals the number of execute
+    attempts completed and observe_node stops the loop after exactly
+    MAX_ITERATIONS attempts. Without this bump the loop edge (observe→router)
+    never revisits assess and the guard never triggers (GraphRecursionError
+    at LangGraph's limit — live-proven 2026-08-24).
     """
     update = await _router_node_inner(state)
     update["iteration_count"] = state.get("iteration_count", 0) + 1
