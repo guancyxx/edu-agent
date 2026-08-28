@@ -38,3 +38,4 @@ dsh-workbench/spike/
 
 # Curriculum knowledge trees are code, not runtime data
 !backend/app/curriculum/data/
+.agents/
